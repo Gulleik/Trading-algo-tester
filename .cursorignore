@@ -1,0 +1,19 @@
+# Ignore data and environment files
+data/
+*.csv
+*.parquet
+.env
+.env.*
+
+# Ignore build artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore editor/IDE files
+.vscode/
+.idea/
+
+# Ignore OS cruft
+.DS_Store
+Thumbs.db

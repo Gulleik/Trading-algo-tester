@@ -1,0 +1,32 @@
+# =========================================================
+# Project: Trading strategy research in Python
+# =========================================================
+
+[GLOBAL STYLE]
+- Language: Python 3.13
+- Follow PEP8, use snake_case for functions/vars, PascalCase for classes.
+- Always add type hints and docstrings.
+- Keep functions small, modular, and testable.
+- No PineScript. All strategy logic, backtesting, and optimization stays in Python.
+
+[CODE SCOPE]
+- This repo is for:
+  - Loading historical OHLCV data (CSV/Parquet).
+  - Implementing trading strategies in Python.
+  - Running backtests with fees/slippage.
+  - Measuring performance metrics (Sharpe, drawdown, CAGR, etc.).
+  - Optimizing parameters with Optuna or similar.
+- Out of scope:
+  - No live trading integration (for now).
+  - No UI automation of TradingView.
+  - No PineScript generation.
+
+[STYLE]
+- Use pandas DataFrame as the base for OHLCV data: timestamp (UTC, index), open, high, low, close, volume.
+- Equity curve calculations start at 1.0.
+- Prefer returning dicts with metrics instead of printing.
+- Document inputs/outputs for every public function.
+
+[WHEN UNSURE]
+- Prefer explicit configuration (e.g., YAML/JSON) instead of hardcoding.
+- Ask before adding external dependencies beyond pandas/numpy/optuna.
