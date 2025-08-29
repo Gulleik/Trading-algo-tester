@@ -1,126 +1,155 @@
 """
-Data loading module for fetching OHLCV and funding data from cryptocurrency exchanges.
-
-This module handles all data fetching operations using the ccxt library,
-including rate limiting, error handling, and data processing.
+Data loading module for fetching OHLCV data from Bybit.
 """
 
 import ccxt
 import pandas as pd
 import time
-from typing import Optional, Dict, List, Any
-from config import (
-    EXCHANGE_NAME, DEFAULT_TIMEFRAME, DEFAULT_CANDLE_LIMIT, MAX_API_CALLS, 
-    RATE_LIMIT_DELAY, SYMBOLS_CONFIG, get_symbol_by_name, get_timeframes_for_symbol,
-    get_data_length_for_symbol
-)
+from typing import Optional
 
 
 def get_exchange_instance() -> ccxt.Exchange:
-    """
-    Get exchange instance based on configuration.
-    
-    Returns:
-        ccxt.Exchange: Configured exchange instance
-        
-    Raises:
-        ValueError: If the exchange is not supported
-    """
-    exchange_map = {
-        "bybit": ccxt.bybit,
-        "binance": ccxt.binance,
-        "okx": ccxt.okx,
-        "kucoin": ccxt.kucoin,
-        "coinbase": ccxt.coinbase
-    }
-    
-    if EXCHANGE_NAME not in exchange_map:
-        raise ValueError(f"Unsupported exchange: {EXCHANGE_NAME}")
-    
-    return exchange_map[EXCHANGE_NAME]()
+    """Get Bybit exchange instance."""
+    return ccxt.bybit()
 
 
 def fetch_ohlcv_all(
     exchange: ccxt.Exchange, 
     symbol: str, 
     timeframe: str, 
-    data_length: Optional[int] = None, 
+    data_length: int = 1000, 
     since: Optional[int] = None
 ) -> pd.DataFrame:
     """
-    Fetch all OHLCV data for a symbol and timeframe.
+    Fetch OHLCV data for a symbol and timeframe with pagination support.
     
     Args:
         exchange: CCXT exchange instance
         symbol: Trading symbol (e.g., "BTC/USDT:USDT")
         timeframe: Data timeframe (e.g., "5m", "1h")
-        data_length: Number of candles to fetch (overrides symbol config)
+        data_length: Number of candles to fetch (can be > 1000)
         since: Start timestamp for fetching (milliseconds)
         
     Returns:
         pd.DataFrame: DataFrame with OHLCV data columns: 
                      timestamp, open, high, low, close, volume
-        
-    Note:
-        - Timestamps are converted to UTC datetime
-        - Data is deduplicated and sorted by timestamp
-        - Rate limiting is applied between API calls
     """
-    # Get symbol configuration
-    symbol_config = get_symbol_by_name(symbol)
-    if symbol_config:
-        # Use symbol-specific data length if not specified
-        if data_length is None:
-            data_length = symbol_config["data_length"]
-        
-        # Validate timeframe
-        if timeframe not in symbol_config["timeframes"]:
-            print(f"Warning: {timeframe} not in allowed timeframes for {symbol}")
-            print(f"Allowed timeframes: {symbol_config['timeframes']}")
-    
-    # Use default if no symbol config found
-    if data_length is None:
-        data_length = DEFAULT_CANDLE_LIMIT
-    
     all_rows = []
     api_calls = 0
+    max_api_calls = 200  # Increased limit for larger data requests
     
-    while api_calls < MAX_API_CALLS:
+    # Bybit limit per request
+    max_limit_per_request = 1000
+    
+    print(f"Starting to fetch {data_length} candles for {symbol} at {timeframe}")
+    
+    # If no since timestamp provided, start from a reasonable past time
+    if since is None:
+        # Calculate timeframe in milliseconds
+        if timeframe == '1m':
+            time_ms = 60 * 1000
+        elif timeframe == '5m':
+            time_ms = 5 * 60 * 1000
+        elif timeframe == '15m':
+            time_ms = 15 * 60 * 1000
+        elif timeframe == '30m':
+            time_ms = 30 * 60 * 1000
+        elif timeframe == '1h':
+            time_ms = 60 * 60 * 1000
+        elif timeframe == '4h':
+            time_ms = 4 * 60 * 60 * 1000
+        elif timeframe == '1d':
+            time_ms = 24 * 60 * 60 * 1000
+        else:
+            # Default to 1 hour if timeframe not recognized
+            time_ms = 60 * 60 * 1000
+        
+        # Start from a time that's data_length * timeframe in the past
+        # This ensures we have enough historical data to work with
+        current_time = int(pd.Timestamp.now(tz='UTC').timestamp() * 1000)
+        since = current_time - (data_length * time_ms)
+        print(f"Starting from calculated past time: {pd.to_datetime(since, unit='ms', utc=True)}")
+    
+    while api_calls < max_api_calls and len(all_rows) < data_length:
         try:
+            # Calculate how many candles to request in this batch
+            remaining_candles = data_length - len(all_rows)
+            current_limit = min(remaining_candles, max_limit_per_request)
+            
+            print(f"API call {api_calls + 1}: Requesting {current_limit} candles, {remaining_candles} remaining...")
+            
             chunk = exchange.fetch_ohlcv(
                 symbol, 
                 timeframe=timeframe, 
                 since=since, 
-                limit=min(data_length, DEFAULT_CANDLE_LIMIT)
+                limit=current_limit
             )
             
             if not chunk:
+                print(f"No more data available for {symbol} at {timeframe}")
                 break
                 
             all_rows.extend(chunk)
             api_calls += 1
             
+            print(f"Fetched batch {api_calls}: {len(chunk)} candles. Total: {len(all_rows)}/{data_length}")
+            
             # Check if we have enough data
             if len(all_rows) >= data_length:
                 all_rows = all_rows[:data_length]
+                print(f"Reached target data length: {len(all_rows)} candles")
                 break
             
-            # Next since = last timestamp + 1 ms
-            since = chunk[-1][0] + 1
+            # For backwards fetching, we need to calculate the previous timestamp
+            # based on the timeframe
+            if len(chunk) > 0:
+                # Calculate the timestamp for the previous period
+                if timeframe == '1m':
+                    time_ms = 60 * 1000
+                elif timeframe == '5m':
+                    time_ms = 5 * 60 * 1000
+                elif timeframe == '15m':
+                    time_ms = 15 * 60 * 1000
+                elif timeframe == '30m':
+                    time_ms = 30 * 60 * 1000
+                elif timeframe == '1h':
+                    time_ms = 60 * 60 * 1000
+                elif timeframe == '4h':
+                    time_ms = 4 * 60 * 60 * 1000
+                elif timeframe == '1d':
+                    time_ms = 24 * 60 * 60 * 1000
+                else:
+                    # Default to 1 hour if timeframe not recognized
+                    time_ms = 60 * 60 * 1000
+                
+                # Go backwards in time
+                old_since = since
+                since = since - (len(chunk) * time_ms)
+                print(f"Updated since timestamp: {old_since} -> {since} ({pd.to_datetime(since, unit='ms', utc=True)})")
             
-            # Rate limiting
-            time.sleep(RATE_LIMIT_DELAY)
+            # Rate limiting - be more conservative with larger requests
+            if data_length > 5000:
+                time.sleep(0.2)  # Slower for very large requests
+            else:
+                time.sleep(0.1)
             
             # Check if we got less data than requested (end of available data)
-            if len(chunk) < DEFAULT_CANDLE_LIMIT:
+            # Only break if we got significantly less than requested
+            if len(chunk) < current_limit * 0.9:  # Allow some variance
+                print(f"Reached end of available data. Got {len(chunk)} instead of {current_limit}")
                 break
                 
         except Exception as e:
-            print(f"Error fetching data for {symbol}: {e}")
-            break
+            print(f"Error fetching data for {symbol} (batch {api_calls}): {e}")
+            # Wait a bit longer on error before retrying
+            time.sleep(1)
+            continue
     
     if not all_rows:
+        print(f"No data fetched for {symbol}")
         return pd.DataFrame()
+    
+    print(f"Successfully fetched {len(all_rows)} candles in {api_calls} API calls")
     
     # Create DataFrame
     cols = ["timestamp", "open", "high", "low", "close", "volume"]
@@ -133,119 +162,45 @@ def fetch_ohlcv_all(
     return df.reset_index(drop=True)
 
 
-def fetch_funding_rates(
-    exchange: ccxt.Exchange, 
-    symbol: str, 
-    since: Optional[int] = None, 
-    limit: Optional[int] = None
+def fetch_ohlcv_with_date_range(
+    exchange: ccxt.Exchange,
+    symbol: str,
+    timeframe: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    max_candles: int = 10000
 ) -> pd.DataFrame:
     """
-    Fetch funding rates for perpetual contracts.
+    Fetch OHLCV data within a specific date range with pagination.
     
     Args:
         exchange: CCXT exchange instance
         symbol: Trading symbol (e.g., "BTC/USDT:USDT")
-        since: Start timestamp for fetching (milliseconds)
-        limit: Maximum number of funding rate records to fetch
+        timeframe: Data timeframe (e.g., "5m", "1h")
+        start_date: Start date string (e.g., "2024-01-01")
+        end_date: End date string (e.g., "2024-12-31")
+        max_candles: Maximum number of candles to fetch
         
     Returns:
-        pd.DataFrame: DataFrame with funding rate data columns:
-                     timestamp, fundingRate
-                     
-    Note:
-        - Only works for exchanges that support funding rate fetching
-        - Returns empty DataFrame if funding rates not available
+        pd.DataFrame: DataFrame with OHLCV data
     """
-    try:
-        # Check if exchange supports funding rates
-        if not hasattr(exchange, 'fetch_funding_rate_history'):
-            print(f"Warning: {exchange.id} does not support funding rate fetching")
-            return pd.DataFrame()
-        
-        funding_data = exchange.fetch_funding_rate_history(
-            symbol, 
-            since=since, 
-            limit=limit
-        )
-        
-        if not funding_data:
-            return pd.DataFrame()
-        
-        # Create DataFrame
-        df = pd.DataFrame(funding_data)
-        
-        # Standardize column names
-        if 'fundingRate' in df.columns:
-            df = df[['timestamp', 'fundingRate']]
-        elif 'funding_rate' in df.columns:
-            df = df[['timestamp', 'funding_rate']]
-            df = df.rename(columns={'funding_rate': 'fundingRate'})
-        else:
-            print(f"Warning: Unexpected funding rate column names: {df.columns.tolist()}")
-            return pd.DataFrame()
-        
-        # Clean and process data
-        df = df.drop_duplicates("timestamp").sort_values("timestamp")
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        
-        return df.reset_index(drop=True)
-        
-    except Exception as e:
-        print(f"Error fetching funding rates for {symbol}: {e}")
-        return pd.DataFrame()
-
-
-def fetch_ticker(exchange: ccxt.Exchange, symbol: str) -> Dict[str, Any]:
-    """
-    Fetch current ticker information for a symbol.
+    # Convert dates to timestamps if provided
+    since = None
+    if start_date:
+        since = pd.to_datetime(start_date).tz_localize('UTC').timestamp() * 1000
     
-    Args:
-        exchange: CCXT exchange instance
-        symbol: Trading symbol
-        
-    Returns:
-        Dict containing ticker information (last price, bid, ask, volume, etc.)
-    """
-    try:
-        ticker = exchange.fetch_ticker(symbol)
-        return ticker
-    except Exception as e:
-        print(f"Error fetching ticker for {symbol}: {e}")
-        return {}
-
-
-def get_available_symbols(exchange: ccxt.Exchange) -> List[str]:
-    """
-    Get list of available trading symbols from the exchange.
+    # Fetch data with pagination
+    df = fetch_ohlcv_all(
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=timeframe,
+        data_length=max_candles,
+        since=since
+    )
     
-    Args:
-        exchange: CCXT exchange instance
-        
-    Returns:
-        List of available symbol strings
-    """
-    try:
-        markets = exchange.load_markets()
-        return list(markets.keys())
-    except Exception as e:
-        print(f"Error loading markets: {e}")
-        return []
-
-
-def validate_symbol(exchange: ccxt.Exchange, symbol: str) -> bool:
-    """
-    Check if a symbol is valid and available on the exchange.
+    # Filter by end date if specified
+    if end_date and not df.empty:
+        end_timestamp = pd.to_datetime(end_date).tz_localize('UTC')
+        df = df[df['timestamp'] <= end_timestamp]
     
-    Args:
-        exchange: CCXT exchange instance
-        symbol: Trading symbol to validate
-        
-    Returns:
-        True if symbol is valid and available, False otherwise
-    """
-    try:
-        markets = exchange.load_markets()
-        return symbol in markets
-    except Exception as e:
-        print(f"Error validating symbol {symbol}: {e}")
-        return False
+    return df

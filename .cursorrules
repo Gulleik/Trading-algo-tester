@@ -8,6 +8,7 @@
 - Always add type hints and docstrings.
 - Keep functions small, modular, and testable.
 - No PineScript. All strategy logic, backtesting, and optimization stays in Python.
+- Codebase must stay minimalistic and compact: no extra functions, no speculative abstractions, only implement what is actually needed.
 
 [MAIN FILE RULES]
 - The main file is primarily for program execution (CLI entry point).
@@ -42,6 +43,7 @@
 - Equity curve calculations start at 1.0 unless leverage specified.
 - Prefer returning dicts with metrics instead of printing.
 - Document inputs/outputs for every public function.
+- Keep code minimalistic: do not add unused parameters, placeholder functions, or abstractions that aren’t immediately required.
 
 [METRICS TO TRACK]
 
@@ -68,4 +70,4 @@
 - Assume leverage is enabled; margin and liquidation mechanics must be considered in simulations.
 - Always calculate/report the above metrics.
 - Prefer explicit configuration (e.g., YAML/JSON) instead of hardcoding.
-- Ask before adding external dependencies beyond pandas/numpy/optuna.
+- Do not over-engineer. Only implement what is necessary and useful.
