@@ -9,12 +9,27 @@
 - Keep functions small, modular, and testable.
 - No PineScript. All strategy logic, backtesting, and optimization stays in Python.
 
+[MAIN FILE RULES]
+- The main file is primarily for program execution (CLI entry point).
+- It should contain as few functions as possible.
+- Import logic from dedicated modules (data_loader, strategies, engine, metrics, optimization, etc.).
+- No business logic, calculations, or strategy code in the main file.
+
+[TRADING CONTEXT]
+- Exchange: Bybit only.
+- Instruments: Perpetual contracts only (linear USDT-margined).
+- Always assume leveraged trading (user will configure leverage per strategy/test).
+- Must include:
+  - Funding rates in PnL calculations.
+  - Taker/maker fees.
+  - Leverage effects on margin, liquidation, and risk sizing.
+
 [CODE SCOPE]
 - This repo is for:
-  - Loading historical OHLCV data (CSV/Parquet).
+  - Downloading OHLCV + funding data from Bybit API.
   - Implementing trading strategies in Python.
-  - Running backtests with fees/slippage.
-  - Measuring performance metrics (Sharpe, drawdown, CAGR, etc.).
+  - Running backtests that support leverage, fees, and funding.
+  - Measuring strategy performance based on the defined metrics (below).
   - Optimizing parameters with Optuna or similar.
 - Out of scope:
   - No live trading integration (for now).
@@ -22,11 +37,35 @@
   - No PineScript generation.
 
 [STYLE]
-- Use pandas DataFrame as the base for OHLCV data: timestamp (UTC, index), open, high, low, close, volume.
-- Equity curve calculations start at 1.0.
+- Use pandas DataFrame as the base for OHLCV data: timestamp (UTC index), open, high, low, close, volume.
+- Funding data: timestamp (UTC index), fundingRate.
+- Equity curve calculations start at 1.0 unless leverage specified.
 - Prefer returning dicts with metrics instead of printing.
 - Document inputs/outputs for every public function.
 
+[METRICS TO TRACK]
+
+🔑 Core Profitability Metrics
+- Win rate (%) – % of trades closed in profit.
+- Average win vs. average loss (R:R).
+- Profit factor – (sum of wins ÷ sum of losses).
+- Net profit % – total % return over the test period.
+
+📉 Risk & Drawdown Metrics
+- Maximum drawdown (%).
+- Sharpe ratio / Sortino ratio.
+- Exposure (% of capital at risk).
+- Max consecutive losses.
+
+⚙️ Strategy Behavior Metrics
+- Number of trades per day.
+- Holding time per trade.
+- Slippage & fees – execution cost vs. backtest assumptions.
+- Break-even point (incl. fees).
+
 [WHEN UNSURE]
+- Default to Bybit linear perp conventions.
+- Assume leverage is enabled; margin and liquidation mechanics must be considered in simulations.
+- Always calculate/report the above metrics.
 - Prefer explicit configuration (e.g., YAML/JSON) instead of hardcoding.
 - Ask before adding external dependencies beyond pandas/numpy/optuna.
