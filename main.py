@@ -33,7 +33,7 @@ def display_results(symbol, data, result):
     print("=" * 60)
 
 
-def run_strategy_test(symbol, timeframe, data_length, fast_period, slow_period, initial_capital):
+def run_strategy_test(symbol, timeframe, data_length, initial_capital):
     """Run a complete strategy test with the given parameters."""
     try:
         # Initialize strategy tester
@@ -57,8 +57,12 @@ def run_strategy_test(symbol, timeframe, data_length, fast_period, slow_period, 
             return None
             
         # Test strategy
-        print(f"\nTesting SimpleMA strategy...")
-        result = tester.test_strategy_from_data('SimpleMAStrategy', data, fast_period=fast_period, slow_period=slow_period)
+        print(f"\nTesting Fibonacci Channel strategy...")
+        result = tester.test_strategy_from_data('FibonacciChannelStrategy', data, 
+                                              sensitivity=5, 
+                                              stop_loss_pct=0.75,
+                                              risk_per_trade=0.02,
+                                              use_take_profits=True)
         
         return tester, data, result
         
@@ -74,8 +78,6 @@ def main():
     symbol = "BTC/USDT:USDT"
     timeframe = "5m"
     data_length = 2000
-    fast_period = 10
-    slow_period = 20
     initial_capital = 10000.0
     
     # Plotting options
@@ -84,7 +86,7 @@ def main():
     plot_filename = f"strategy_results_{symbol.replace('/', '_').replace(':', '_')}_{timeframe}.png"
     
     # Run the test
-    result = run_strategy_test(symbol, timeframe, data_length, fast_period, slow_period, initial_capital)
+    result = run_strategy_test(symbol, timeframe, data_length, initial_capital)
     
     # Display results and generate plots if successful
     if result:
@@ -93,13 +95,13 @@ def main():
         
         # Display comprehensive metrics table
         print("\n" + "="*80)
-        tester.display_comprehensive_metrics('SimpleMAStrategy')
+        tester.display_comprehensive_metrics('FibonacciChannelStrategy')
         
         # Generate plots
         if show_plots or save_plots:
             print(f"\nGenerating plots...")
             tester.plot_results(
-                'SimpleMAStrategy', 
+                'FibonacciChannelStrategy', 
                 data, 
                 save_path=plot_filename if save_plots else None,
                 show_plot=show_plots

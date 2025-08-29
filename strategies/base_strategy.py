@@ -61,6 +61,10 @@ class BaseStrategy(ABC):
         self.entry_time = None
         self.current_size = 0.0
         
+        # Partial position management
+        self.original_position_size = 0.0
+        self.remaining_position_size = 0.0
+        
         # Trade history
         self.trades: List[Trade] = []
         self.current_trade: Optional[Trade] = None
@@ -103,7 +107,17 @@ class BaseStrategy(ABC):
         pass
     
     def calculate_position_size(self, price: float, risk_per_trade: float = 0.02) -> float:
-        """Calculate position size based on risk management rules."""
+        """
+        Calculate position size based on risk management rules.
+        
+        Args:
+            price: Entry price for the position
+            risk_per_trade: Risk per trade as percentage of capital (default: 2%)
+            
+        Returns:
+            Position size in units
+        """
+        # Default base implementation
         risk_amount = self.current_capital * risk_per_trade
         position_value = risk_amount * self.leverage
         return position_value / price
@@ -123,6 +137,8 @@ class BaseStrategy(ABC):
         self.entry_price = price
         self.entry_time = timestamp
         self.current_size = size
+        self.original_position_size = size
+        self.remaining_position_size = size
         
         # Create trade record
         self.current_trade = Trade(
@@ -189,6 +205,8 @@ class BaseStrategy(ABC):
         self.entry_price = price
         self.entry_time = timestamp
         self.current_size = size
+        self.original_position_size = size
+        self.remaining_position_size = size
         
         # Create trade record
         self.current_trade = Trade(
@@ -446,6 +464,8 @@ class BaseStrategy(ABC):
         self.entry_price = 0.0
         self.entry_time = None
         self.current_size = 0.0
+        self.original_position_size = 0.0
+        self.remaining_position_size = 0.0
         self.trades = []
         self.current_trade = None
         self.equity_curve = [self.initial_capital]

@@ -32,13 +32,16 @@ class StrategyTester:
     
     def list_available_strategies(self) -> List[str]:
         """Get list of available strategy names."""
-        return ['SimpleMAStrategy']
+        return ['SimpleMAStrategy', 'FibonacciChannelStrategy']
     
     def load_strategy(self, strategy_name: str, **params) -> BaseStrategy:
         """Load a strategy instance with given parameters."""
         if strategy_name == 'SimpleMAStrategy':
             from strategies.simple_ma_strategy import SimpleMAStrategy
             return SimpleMAStrategy(**params)
+        elif strategy_name == 'FibonacciChannelStrategy':
+            from strategies.fibnacci_stratergy import FibonacciChannelStrategy
+            return FibonacciChannelStrategy(**params)
         else:
             raise ValueError(f"Unknown strategy: {strategy_name}")
     
@@ -78,6 +81,16 @@ class StrategyTester:
             
             # Get the actual timestamp from the row data, not the index
             actual_timestamp = row['timestamp'] if 'timestamp' in row else pd.Timestamp.now()
+            
+            # Check for stop loss first (highest priority)
+            if hasattr(strategy, 'check_stop_loss') and strategy.position != strategy.position.FLAT:
+                if strategy.check_stop_loss(current_price, actual_timestamp):
+                    # Stop loss was hit, position closed, continue to next iteration
+                    continue
+            
+            # Check for take profit levels if in a position
+            if hasattr(strategy, 'check_take_profits') and strategy.position != strategy.position.FLAT:
+                strategy.check_take_profits(current_price, actual_timestamp)
             
             # Check for entry/exit signals
             if strategy.position == strategy.position.FLAT:
