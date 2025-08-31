@@ -124,24 +124,32 @@ class StrategyTester:
             actual_timestamp = pd.to_datetime(actual_timestamp)
             
             # Check for stop loss first (highest priority)
-            if hasattr(strategy, 'check_stop_loss') and strategy.position != strategy.position.FLAT:
-                if strategy.check_stop_loss(current_price, actual_timestamp):
-                    # Stop loss was hit, position closed, continue to next iteration
+            # ✅ correct (pass the whole row so strategy can check high/low/open/close)
+            if hasattr(strategy, 'check_stop_loss') and strategy.position != Position.FLAT:
+                if strategy.check_stop_loss(row, actual_timestamp):
                     continue
-            
-            # Check for take profit levels if in a position
-            if hasattr(strategy, 'check_take_profits') and strategy.position != strategy.position.FLAT:
-                strategy.check_take_profits(current_price, actual_timestamp)
+
+            if hasattr(strategy, 'check_take_profits') and strategy.position != Position.FLAT:
+                strategy.check_take_profits(row, actual_timestamp)
+
             
             # Check for entry/exit signals
             if strategy.position == strategy.position.FLAT:
                 # Check for entry signals
                 if strategy.should_enter_long(row, signals_data):
-                    size = strategy.calculate_position_size(current_price)
+                    # Calculate position size for long trade
+                    if hasattr(strategy, 'calculate_position_size_for_direction'):
+                        size = strategy.calculate_position_size_for_direction(current_price, True, signals_row=row)
+                    else:
+                        size = strategy.calculate_position_size(current_price, signals_row=row)
                     strategy.enter_long(actual_timestamp, current_price, size)
                 
                 elif strategy.should_enter_short(row, signals_data):
-                    size = strategy.calculate_position_size(current_price)
+                    # Calculate position size for short trade
+                    if hasattr(strategy, 'calculate_position_size_for_direction'):
+                        size = strategy.calculate_position_size_for_direction(current_price, False, signals_row=row)
+                    else:
+                        size = strategy.calculate_position_size(current_price, signals_row=row)
                     strategy.enter_short(actual_timestamp, current_price, size)
             
             elif strategy.position == strategy.position.LONG:
