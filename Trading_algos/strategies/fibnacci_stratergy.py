@@ -27,7 +27,9 @@ class FibonacciChannelStrategy(BaseStrategy):
                  sensitivity: int = 5,
                  initial_capital: float = 10_000.0,
                  leverage: float = 1.0,
-                 commission_rate: float = 0.0006,
+                 commission_rate: float = 0.001,
+                 maker_fee: float = 0.0002,
+                 taker_fee: float = 0.00055,
                  slippage: float = 0.0002,
                  sl_percent: float = 0.75,
                  fixed_stop: bool = True,
@@ -38,8 +40,8 @@ class FibonacciChannelStrategy(BaseStrategy):
                  tp3_pct: float = 1.50, tp3_close: float = 25.0,
                  tp4_pct: float = 2.00, tp4_close: float = 25.0,
                  risk_per_trade: float = 0.02,
-                 timeframe: str = "5m"):
-        super().__init__(name, initial_capital, leverage, commission_rate, slippage, timeframe)
+                 timeframe: str = "15m"):
+        super().__init__(name, initial_capital, leverage, commission_rate, maker_fee, taker_fee, slippage, timeframe)
 
         self.sensitivity = int(sensitivity)
         if fixed_stop and sl_percent <= 0:
@@ -263,12 +265,12 @@ class FibonacciChannelStrategy(BaseStrategy):
             if self.position == PositionType.LONG:
                 sl_price = entry * (1.0 - sl_frac)
                 if current_price <= sl_price and not same_bar:
-                    self.exit_long(ts, current_price)
+                    self._exit_long_with_order_type(ts, current_price, None, OrderType.STOP_LOSS)
                     return True
             elif self.position == PositionType.SHORT:
                 sl_price = entry * (1.0 + sl_frac)
                 if current_price >= sl_price and not same_bar:
-                    self.exit_short(ts, current_price)
+                    self._exit_short_with_order_type(ts, current_price, None, OrderType.STOP_LOSS)
                     return True
             return False
 
@@ -285,12 +287,12 @@ class FibonacciChannelStrategy(BaseStrategy):
             if self.position == PositionType.LONG and not same_bar:
                 # For LONG: BE hit only if price revisits entry on a red/flat candle
                 if (low <= entry) and not (close_ >= open_):
-                    self.exit_long(ts, entry)
+                    self._exit_long_with_order_type(ts, entry, None, OrderType.STOP_LOSS)  # BE exit uses taker fee
                     return True
             elif self.position == PositionType.SHORT and not same_bar:
                 # For SHORT: BE hit only if price revisits entry on a green/flat candle
                 if (high >= entry) and not (close_ <= open_):
-                    self.exit_short(ts, entry)
+                    self._exit_short_with_order_type(ts, entry, None, OrderType.STOP_LOSS)  # BE exit uses taker fee
                     return True
             return False
 
@@ -299,12 +301,12 @@ class FibonacciChannelStrategy(BaseStrategy):
         if self.position == PositionType.LONG:
             sl_price = entry * (1.0 - sl_frac) if self.fixed_stop else float(row.get("fib_786", entry)) * (1.0 - sl_frac)
             if (low <= sl_price) and not same_bar:
-                self.exit_long(ts, sl_price)
+                self._exit_long_with_order_type(ts, sl_price, None, OrderType.STOP_LOSS)
                 return True
         else:  # SHORT
             sl_price = entry * (1.0 + sl_frac) if self.fixed_stop else float(row.get("fib_236", entry)) * (1.0 + sl_frac)
             if (high >= sl_price) and not same_bar:
-                self.exit_short(ts, sl_price)
+                self._exit_short_with_order_type(ts, sl_price, None, OrderType.STOP_LOSS)
                 return True
 
         return False
@@ -357,11 +359,11 @@ class FibonacciChannelStrategy(BaseStrategy):
                 self._tp_hit_idx.add(idx)
                 continue
 
-            # Execute partial exit using the new order system
+            # Execute partial exit using the new order system (TPs use maker fees)
             if self.position == PositionType.LONG:
-                order_id = self.exit_long(timestamp, target_price, size_to_exit)
+                order_id = self._exit_long_with_order_type(timestamp, target_price, size_to_exit, OrderType.TAKE_PROFIT)
             else:
-                order_id = self.exit_short(timestamp, target_price, size_to_exit)
+                order_id = self._exit_short_with_order_type(timestamp, target_price, size_to_exit, OrderType.TAKE_PROFIT)
             
             self._tp_hit_idx.add(idx)
 
@@ -390,6 +392,8 @@ class FibonacciChannelStrategy(BaseStrategy):
             "sensitivity": self.sensitivity,
             "leverage": self.leverage,
             "commission_rate": self.commission_rate,
+            "maker_fee": self.maker_fee,
+            "taker_fee": self.taker_fee,
             "slippage": self.slippage,
             "sl_percent": self.sl_percent,
             "fixed_stop": self.fixed_stop,
@@ -406,6 +410,10 @@ class FibonacciChannelStrategy(BaseStrategy):
             self.leverage = float(params["leverage"])
         if "commission_rate" in params:
             self.commission_rate = float(params["commission_rate"])
+        if "maker_fee" in params:
+            self.maker_fee = float(params["maker_fee"])
+        if "taker_fee" in params:
+            self.taker_fee = float(params["taker_fee"])
         if "slippage" in params:
             self.slippage = float(params["slippage"])
         if "sl_percent" in params:

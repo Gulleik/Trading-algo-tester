@@ -130,6 +130,7 @@ class BaseStrategy(ABC):
     
     def __init__(self, name: str, initial_capital: float = 10000.0, 
                  leverage: float = 1.0, commission_rate: float = 0.001,
+                 maker_fee: float = 0.0002, taker_fee: float = 0.00055,
                  slippage: float = 0.0005, timeframe: str = "5m"):
         """
         Initialize the base strategy.
@@ -138,7 +139,9 @@ class BaseStrategy(ABC):
             name: Strategy name for identification
             initial_capital: Starting capital in quote currency
             leverage: Leverage multiplier for position sizing
-            commission_rate: Commission rate as decimal (0.001 = 0.1%)
+            commission_rate: Commission rate as decimal (0.001 = 0.1%) - legacy fallback
+            maker_fee: Maker fee rate for placing/partial positions (0.0002 = 0.02%)
+            taker_fee: Taker fee rate for SL/BE hits (0.00055 = 0.055%)
             slippage: Slippage rate as decimal (0.0005 = 0.05%)
             timeframe: Data timeframe (e.g., "1m", "5m", "15m", "1h", "4h", "1d")
         """
@@ -146,7 +149,9 @@ class BaseStrategy(ABC):
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
         self.leverage = leverage
-        self.commission_rate = commission_rate
+        self.commission_rate = commission_rate  # Legacy fallback
+        self.maker_fee = maker_fee
+        self.taker_fee = taker_fee
         self.slippage = slippage
         self.timeframe = timeframe
         
@@ -186,6 +191,217 @@ class BaseStrategy(ABC):
             "1d": 1440
         }
         return timeframe_map.get(self.timeframe, 5)  # Default to 5 minutes if unknown
+    
+    def _get_fee_rate(self, order_type: OrderType) -> float:
+        """
+        Get the appropriate fee rate based on order type.
+        
+        Maker fees: Market entries, partial closes, take profits
+        Taker fees: Stop losses, breakeven exits
+        
+        Args:
+            order_type: The type of order being executed
+            
+        Returns:
+            Fee rate as decimal
+        """
+        # Taker fees (aggressive orders that remove liquidity)
+        if order_type in [OrderType.STOP_LOSS]:
+            return self.taker_fee
+        
+        # Maker fees (passive orders that add liquidity) 
+        # Note: Market entries are typically taker orders in reality, but per user requirements
+        # we treat them as maker fees since they are "placing a position"
+        elif order_type in [OrderType.MARKET_BUY, OrderType.MARKET_SELL, 
+                           OrderType.PARTIAL_CLOSE, OrderType.TAKE_PROFIT,
+                           OrderType.FULL_CLOSE]:
+            return self.maker_fee
+        
+        # Fallback to legacy commission rate
+        else:
+            return self.commission_rate
+    
+    def _execute_exit_with_fee_type(self, timestamp: pd.Timestamp, price: float, 
+                                   size: float, is_long: bool, order_type: OrderType) -> str:
+        """
+        Execute an exit with specific order type and its associated fee.
+        
+        Args:
+            timestamp: Exit timestamp
+            price: Exit price
+            size: Exit size
+            is_long: True for long position, False for short
+            order_type: Type of order (affects fee calculation)
+            
+        Returns:
+            Order ID
+        """
+        if is_long:
+            return self._exit_long_with_order_type(timestamp, price, size, order_type)
+        else:
+            return self._exit_short_with_order_type(timestamp, price, size, order_type)
+    
+    def _exit_long_with_order_type(self, timestamp: pd.Timestamp, price: float, 
+                                  size: Optional[float], order_type: OrderType) -> str:
+        """Exit long position with specific order type for proper fee calculation."""
+        if self.position != PositionType.LONG or not self.current_trade:
+            return ""
+        
+        # Default to closing entire remaining position
+        if size is None:
+            size = self.current_size
+        
+        # Ensure we don't close more than available
+        size = min(size, self.current_size)
+        
+        if size <= 0:
+            return ""
+            
+        # Calculate PnL and costs
+        exit_value = price * size
+        entry_value = self.entry_price * size
+        pnl = exit_value - entry_value
+        
+        # Use the specified order type for fee calculation
+        fees = exit_value * self._get_fee_rate(order_type)
+        slippage_cost = exit_value * self.slippage
+        self.current_trade.pnl  += pnl
+        self.current_trade.fees += fees
+        
+        # Determine if this is a full close
+        is_full_close = size >= self.current_size - 0.001
+        
+        # Create exit order for enhanced tracking
+        exit_order = Order(
+            order_id=str(uuid.uuid4())[:8],
+            timestamp=timestamp,
+            order_type=order_type,
+            price=price,
+            size=size,
+            fees=fees,
+            slippage=slippage_cost,
+            pnl=pnl
+        )
+        
+        # Update enhanced tracking
+        if self.current_position:
+            self.current_position.add_order(exit_order)
+        self.orders.append(exit_order)
+        
+        # Update legacy state
+        self.current_size -= size
+        
+        # Update capital
+        self.current_capital += pnl - fees - slippage_cost
+        
+        # Check if position is fully closed
+        if is_full_close or self.current_size <= 0.001:
+            # Update legacy trade record
+            self.current_trade.exit_time  = timestamp
+            self.current_trade.exit_price = price
+            
+            # Reset legacy state
+            self.position = PositionType.FLAT
+            self.entry_price = 0.0
+            self.entry_time = None
+            self.current_size = 0.0
+            
+            # Store completed trade
+            self.trades.append(self.current_trade)
+            self.current_trade = None
+            
+            # Reset enhanced state
+            self.current_position_type = PositionType.FLAT
+            if self.current_position:
+                self.current_position.is_closed = True
+                self.current_position.exit_time = timestamp
+            self.current_position = None
+        
+        # Update equity curve
+        self.equity_curve.append(self.current_capital)
+        
+        return exit_order.order_id
+        
+    def _exit_short_with_order_type(self, timestamp: pd.Timestamp, price: float, 
+                                   size: Optional[float], order_type: OrderType) -> str:
+        """Exit short position with specific order type for proper fee calculation."""
+        if self.position != PositionType.SHORT or not self.current_trade:
+            return ""
+        
+        # Default to closing entire remaining position
+        if size is None:
+            size = self.current_size
+        
+        # Ensure we don't close more than available
+        size = min(size, self.current_size)
+        
+        if size <= 0:
+            return ""
+            
+        # Calculate PnL and costs
+        exit_value = price * size
+        entry_value = self.entry_price * size
+        pnl = entry_value - exit_value  # Short: sell high, buy low
+        
+        # Use the specified order type for fee calculation
+        fees = exit_value * self._get_fee_rate(order_type)
+        slippage_cost = exit_value * self.slippage
+        self.current_trade.pnl  += pnl
+        self.current_trade.fees += fees
+        
+        # Determine if this is a full close
+        is_full_close = size >= self.current_size - 0.001
+        
+        # Create exit order for enhanced tracking
+        exit_order = Order(
+            order_id=str(uuid.uuid4())[:8],
+            timestamp=timestamp,
+            order_type=order_type,
+            price=price,
+            size=size,
+            fees=fees,
+            slippage=slippage_cost,
+            pnl=pnl
+        )
+        
+        # Update enhanced tracking
+        if self.current_position:
+            self.current_position.add_order(exit_order)
+        self.orders.append(exit_order)
+        
+        # Update legacy state
+        self.current_size -= size
+        
+        # Update capital
+        self.current_capital += pnl - fees - slippage_cost
+        
+        # Check if position is fully closed
+        if is_full_close or self.current_size <= 0.001:
+            # Update legacy trade record
+            self.current_trade.exit_time  = timestamp
+            self.current_trade.exit_price = price
+            
+            # Reset legacy state
+            self.position = PositionType.FLAT
+            self.entry_price = 0.0
+            self.entry_time = None
+            self.current_size = 0.0
+            
+            # Store completed trade
+            self.trades.append(self.current_trade)
+            self.current_trade = None
+            
+            # Reset enhanced state
+            self.current_position_type = PositionType.FLAT
+            if self.current_position:
+                self.current_position.is_closed = True
+                self.current_position.exit_time = timestamp
+            self.current_position = None
+        
+        # Update equity curve
+        self.equity_curve.append(self.current_capital)
+        
+        return exit_order.order_id
         
     @abstractmethod
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -241,9 +457,9 @@ class BaseStrategy(ABC):
         if self.position != PositionType.FLAT:
             return ""  # Already in a position
             
-        # Calculate fees and slippage
+        # Calculate fees and slippage (use maker fee for position entry)
         entry_value = price * size
-        fees = entry_value * self.commission_rate
+        fees = entry_value * self._get_fee_rate(OrderType.MARKET_BUY)
         slippage_cost = entry_value * self.slippage
         
         # Update legacy state (for compatibility)
@@ -321,13 +537,14 @@ class BaseStrategy(ABC):
         entry_value = self.entry_price * size
         pnl = exit_value - entry_value
         
-        fees = exit_value * self.commission_rate
+        # Determine if this is a full or partial close to get correct order type
+        is_full_close = size >= self.current_size - 0.001
+        order_type = OrderType.FULL_CLOSE if is_full_close else OrderType.PARTIAL_CLOSE
+        
+        fees = exit_value * self._get_fee_rate(order_type)
         slippage_cost = exit_value * self.slippage
         self.current_trade.pnl  += pnl
         self.current_trade.fees += fees
-        # Determine if this is a full or partial close
-        is_full_close = size >= self.current_size - 0.001
-        order_type = OrderType.FULL_CLOSE if is_full_close else OrderType.PARTIAL_CLOSE
         
         # Create exit order for enhanced tracking
         exit_order = Order(
@@ -385,9 +602,9 @@ class BaseStrategy(ABC):
         if self.position != PositionType.FLAT:
             return ""  # Already in a position
             
-        # Calculate fees and slippage
+        # Calculate fees and slippage (use maker fee for position entry)
         entry_value = price * size
-        fees = entry_value * self.commission_rate
+        fees = entry_value * self._get_fee_rate(OrderType.MARKET_SELL)
         slippage_cost = entry_value * self.slippage
         
         # Update legacy state (for compatibility)
@@ -465,13 +682,14 @@ class BaseStrategy(ABC):
         entry_value = self.entry_price * size
         pnl = entry_value - exit_value  # Short: sell high, buy low
         
-        fees = exit_value * self.commission_rate
+        # Determine if this is a full or partial close to get correct order type
+        is_full_close = size >= self.current_size - 0.001
+        order_type = OrderType.FULL_CLOSE if is_full_close else OrderType.PARTIAL_CLOSE
+        
+        fees = exit_value * self._get_fee_rate(order_type)
         slippage_cost = exit_value * self.slippage
         self.current_trade.pnl  += pnl
         self.current_trade.fees += fees
-        # Determine if this is a full or partial close
-        is_full_close = size >= self.current_size - 0.001
-        order_type = OrderType.FULL_CLOSE if is_full_close else OrderType.PARTIAL_CLOSE
         
         # Create exit order for enhanced tracking
         exit_order = Order(

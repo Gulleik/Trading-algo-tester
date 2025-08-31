@@ -6,7 +6,6 @@ for backtesting and optimization.
 """
 
 from .base_strategy import BaseStrategy
-from .simple_ma_strategy import SimpleMAStrategy
 from .fibnacci_stratergy import FibonacciChannelStrategy
 
-__all__ = ['BaseStrategy', 'SimpleMAStrategy', 'FibonacciChannelStrategy']
+__all__ = ['BaseStrategy', 'FibonacciChannelStrategy']

@@ -24,6 +24,7 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 from strategies.base_strategy import BaseStrategy, PositionType
+import config
 
 
 class StrategyTester:
@@ -59,13 +60,25 @@ class StrategyTester:
         
         if current_dir not in sys.path:
             sys.path.insert(0, current_dir)
+        
+        # Set default config values if not provided
+        default_params = {
+            'initial_capital': getattr(config, 'INITIAL_CAPITAL', 10000.0),
+            'maker_fee': getattr(config, 'MAKER_FEE', 0.0002),
+            'taker_fee': getattr(config, 'TAKER_FEE', 0.00055),
+            'commission_rate': getattr(config, 'COMMISSION_RATE', 0.001),  # Legacy fallback
+            'slippage': getattr(config, 'SLIPPAGE', 0.0005)
+        }
+        
+        # Merge user params with defaults (user params override defaults)
+        final_params = {**default_params, **params}
             
         if strategy_name == 'SimpleMAStrategy':
             from strategies.simple_ma_strategy import SimpleMAStrategy
-            return SimpleMAStrategy(**params)
+            return SimpleMAStrategy(**final_params)
         elif strategy_name == 'FibonacciChannelStrategy':
             from strategies.fibnacci_stratergy import FibonacciChannelStrategy
-            return FibonacciChannelStrategy(**params)
+            return FibonacciChannelStrategy(**final_params)
         else:
             raise ValueError(f"Unknown strategy: {strategy_name}")
     
