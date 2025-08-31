@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, List
 from pandas import DataFrame
-from .base_strategy import BaseStrategy, Position
+from .base_strategy import BaseStrategy, PositionType, OrderType
 
 
 class SimpleMAStrategy(BaseStrategy):
@@ -163,7 +163,7 @@ class SimpleMAStrategy(BaseStrategy):
             current_price: Current market price
             timestamp: Current timestamp
         """
-        if not self.use_take_profits or self.position == Position.FLAT:
+        if not self.use_take_profits or self.position == PositionType.FLAT:
             return
         
         entry_price = self.entry_price
@@ -177,87 +177,34 @@ class SimpleMAStrategy(BaseStrategy):
             tp_hit = False
             target_price = 0
             
-            if self.position == Position.LONG:
+            if self.current_position_type == PositionType.LONG:
                 target_price = entry_price * (1 + tp_percentage / 100)
                 tp_hit = current_price >= target_price
-            elif self.position == Position.SHORT:
+            elif self.current_position_type == PositionType.SHORT:
                 target_price = entry_price * (1 - tp_percentage / 100)
                 tp_hit = current_price <= target_price
             
             if tp_hit:
                 # Calculate exit size based on original position size
-                if hasattr(self, 'original_position_size') and self.original_position_size > 0:
-                    exit_size = self.original_position_size * exit_percentage
-                else:
-                    exit_size = self.current_size * exit_percentage
+                exit_size = self.original_position_size * exit_percentage
                 
                 # Ensure we don't exit more than remaining position
-                if hasattr(self, 'remaining_position_size'):
-                    exit_size = min(exit_size, self.remaining_position_size)
-                else:
-                    exit_size = min(exit_size, self.current_size)
+                exit_size = min(exit_size, self.current_size)
                 
                 if exit_size > 0:
-                    # Execute partial exit
-                    self._partial_exit(timestamp, current_price, exit_size, tp_percentage, i+1)
+                    # Execute partial exit using the new order system
+                    if self.position == PositionType.LONG:
+                        order_id = self.exit_long(timestamp, current_price, exit_size)
+                    else:
+                        order_id = self.exit_short(timestamp, current_price, exit_size)
+                    
+                    # Mark this TP level as hit
                     self.tp_levels_hit.append(i)
+                    
+                    if self.verbose_trading:
+                        print(f"   🎯 TP{i+1} ({tp_percentage}%) exit: {exit_size:.4f} units at {current_price:.2f}, Order: {order_id}")
     
-    def _partial_exit(self, timestamp, price: float, size: float, tp_percentage: float, tp_number: int) -> None:
-        """Execute a partial exit at a take profit level."""
-        if self.position == Position.FLAT or size <= 0:
-            return
-        
-        # Calculate PnL and costs for this partial exit
-        exit_value = price * size
-        entry_value = self.entry_price * size
-        
-        if self.position == Position.LONG:
-            pnl = exit_value - entry_value
-        else:  # SHORT
-            pnl = entry_value - exit_value
-        
-        fees = exit_value * self.commission_rate
-        slippage_cost = exit_value * self.slippage
-        
-        # Create partial trade record
-        from .base_strategy import Trade
-        partial_trade = Trade(
-            entry_time=self.entry_time,
-            exit_time=timestamp,
-            entry_price=self.entry_price,
-            exit_price=price,
-            position=self.position,
-            size=size,
-            pnl=pnl,
-            fees=fees
-        )
-        
-        # Update position tracking
-        self.current_size -= size
-        if hasattr(self, 'remaining_position_size'):
-            self.remaining_position_size -= size
-        
-        # Check if position is fully closed
-        if self.current_size <= 0.001:  # Small threshold for floating point errors
-            self.position = Position.FLAT
-            self.entry_price = 0.0
-            self.entry_time = None
-            self.current_size = 0.0
-            self.original_position_size = 0.0
-            self.remaining_position_size = 0.0
-            self.tp_levels_hit = []
-        
-        # Update capital
-        self.current_capital += pnl - fees - slippage_cost
-        
-        # Store partial trade
-        self.trades.append(partial_trade)
-        
-        # Update equity curve
-        self.equity_curve.append(self.current_capital)
-        
-        if self.verbose_trading:
-            print(f"   🎯 TP{tp_number} ({tp_percentage}%) exit: {size:.4f} units at {price:.2f}, PnL: ${pnl:,.2f}")
+
     
     def calculate_position_size(self, price: float) -> float:
         """
@@ -295,17 +242,17 @@ class SimpleMAStrategy(BaseStrategy):
         Returns:
             True if stop loss was hit and position was closed
         """
-        if self.position == Position.FLAT:
+        if self.position == PositionType.FLAT:
             return False
         
         entry_price = self.entry_price
         stop_loss_hit = False
         
-        if self.position == Position.LONG:
+        if self.position == PositionType.LONG:
             # For long positions, stop loss is below entry price
             stop_loss_price = entry_price * (1 - self.stop_loss_pct / 100.0)
             stop_loss_hit = current_price <= stop_loss_price
-        elif self.position == Position.SHORT:
+        elif self.position == PositionType.SHORT:
             # For short positions, stop loss is above entry price
             stop_loss_price = entry_price * (1 + self.stop_loss_pct / 100.0)
             stop_loss_hit = current_price >= stop_loss_price
@@ -315,7 +262,7 @@ class SimpleMAStrategy(BaseStrategy):
                 print(f"   🛑 STOP LOSS HIT at {current_price:.2f} (entry: {entry_price:.2f})")
             
             # Close the entire position at stop loss price
-            if self.position == Position.LONG:
+            if self.position == PositionType.LONG:
                 self.exit_long(timestamp, current_price)
             else:
                 self.exit_short(timestamp, current_price)
@@ -336,12 +283,12 @@ class SimpleMAStrategy(BaseStrategy):
         Returns:
             Distance to stop loss as percentage (positive = safe, negative = stop loss hit)
         """
-        if self.position == Position.FLAT:
+        if self.position == PositionType.FLAT:
             return 0.0
         
         entry_price = self.entry_price
         
-        if self.position == Position.LONG:
+        if self.position == PositionType.LONG:
             # For long positions, calculate how far above stop loss we are
             stop_loss_price = entry_price * (1 - self.stop_loss_pct / 100.0)
             distance_pct = ((current_price - stop_loss_price) / entry_price) * 100
@@ -363,7 +310,7 @@ class SimpleMAStrategy(BaseStrategy):
         Returns:
             True if should enter long position
         """
-        return row.get('long_signal', False) and self.position == Position.FLAT
+        return row.get('long_signal', False) and self.position == PositionType.FLAT
     
     def should_exit_long(self, row: pd.Series, signals: pd.DataFrame) -> bool:
         """
@@ -389,7 +336,7 @@ class SimpleMAStrategy(BaseStrategy):
         Returns:
             True if should enter short position
         """
-        return row.get('short_signal', False) and self.position == Position.FLAT
+        return row.get('short_signal', False) and self.position == PositionType.FLAT
     
     def should_exit_short(self, row: pd.Series, signals: DataFrame) -> bool:
         """
@@ -404,37 +351,45 @@ class SimpleMAStrategy(BaseStrategy):
         """
         return row.get('exit_short_signal', False)
     
-    def enter_long(self, timestamp, price: float, size: float) -> None:
+    def enter_long(self, timestamp, price: float, size: float) -> str:
         """Enter a long position with take profit initialization."""
-        super().enter_long(timestamp, price, size)
+        position_id = super().enter_long(timestamp, price, size)
         # Reset TP tracking for new position
         self.tp_levels_hit = []
         if self.verbose_trading:
-            print(f"   📈 LONG entry at {price:.2f}, size: {size:.4f}")
+            print(f"   📈 LONG entry at {price:.2f}, size: {size:.4f}, Position: {position_id}")
+        return position_id
     
-    def enter_short(self, timestamp, price: float, size: float) -> None:
+    def enter_short(self, timestamp, price: float, size: float) -> str:
         """Enter a short position with take profit initialization."""
-        super().enter_short(timestamp, price, size)
+        position_id = super().enter_short(timestamp, price, size)
         # Reset TP tracking for new position
         self.tp_levels_hit = []
         if self.verbose_trading:
-            print(f"   📉 SHORT entry at {price:.2f}, size: {size:.4f}")
+            print(f"   📉 SHORT entry at {price:.2f}, size: {size:.4f}, Position: {position_id}")
+        return position_id
     
-    def exit_long(self, timestamp, price: float) -> None:
+    def exit_long(self, timestamp, price: float, size=None) -> str:
         """Exit remaining long position."""
-        if self.position == Position.LONG:
+        if self.position == PositionType.LONG:
             if self.verbose_trading:
                 print(f"   🔚 LONG exit at {price:.2f}, remaining: {self.current_size:.4f}")
-            super().exit_long(timestamp, price)
-            self.tp_levels_hit = []
+            order_id = super().exit_long(timestamp, price, size)
+            if self.position == PositionType.FLAT:  # Position fully closed
+                self.tp_levels_hit = []
+            return order_id
+        return ""
     
-    def exit_short(self, timestamp, price: float) -> None:
+    def exit_short(self, timestamp, price: float, size=None) -> str:
         """Exit remaining short position."""
-        if self.position == Position.SHORT:
+        if self.position == PositionType.SHORT:
             if self.verbose_trading:
                 print(f"   🔚 SHORT exit at {price:.2f}, remaining: {self.current_size:.4f}")
-            super().exit_short(timestamp, price)
-            self.tp_levels_hit = []
+            order_id = super().exit_short(timestamp, price, size)
+            if self.position == PositionType.FLAT:  # Position fully closed
+                self.tp_levels_hit = []
+            return order_id
+        return ""
     
     def get_parameters(self) -> Dict[str, Any]:
         """

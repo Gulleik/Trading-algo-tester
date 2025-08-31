@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Optional
-from .base_strategy import BaseStrategy, Position, Trade
+from .base_strategy import BaseStrategy, PositionType, OrderType, Trade
 
 
 class FibonacciChannelStrategy(BaseStrategy):
@@ -67,10 +67,13 @@ class FibonacciChannelStrategy(BaseStrategy):
     # ---------- Signals ----------
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
         df = data.copy()
+        if "timestamp" in df.columns:
+            df = df.sort_values("timestamp").reset_index(drop=True)
 
         lookback = max(1, int(self.sensitivity * 10))
-        high_lv = df["high"].rolling(lookback, min_periods=lookback).max()
-        low_lv = df["low"].rolling(lookback, min_periods=lookback).min()
+        # Pine-like behavior: use whatever bars are available (no NaNs on early bars)
+        high_lv = df["high"].rolling(lookback, min_periods=1).max()
+        low_lv  = df["low"].rolling(lookback, min_periods=1).min()
         rng = (high_lv - low_lv).clip(lower=1e-12)
 
         df["fib_236"] = high_lv - rng * 0.236
@@ -118,13 +121,13 @@ class FibonacciChannelStrategy(BaseStrategy):
 
     # ---------- Decision hooks ----------
     def should_enter_long(self, row: pd.Series, signals: pd.DataFrame) -> bool:
-        return bool(row.get("long_signal", False) and self.position == Position.FLAT)
+        return bool(row.get("long_signal", False) and self.position == PositionType.FLAT)
 
     def should_exit_long(self, row: pd.Series, signals: pd.DataFrame) -> bool:
         return bool(row.get("exit_long_signal", False))
 
     def should_enter_short(self, row: pd.Series, signals: pd.DataFrame) -> bool:
-        return bool(row.get("short_signal", False) and self.position == Position.FLAT)
+        return bool(row.get("short_signal", False) and self.position == PositionType.FLAT)
 
     def should_exit_short(self, row: pd.Series, signals: pd.DataFrame) -> bool:
         return bool(row.get("exit_short_signal", False))
@@ -193,35 +196,62 @@ class FibonacciChannelStrategy(BaseStrategy):
         return self.calculate_position_size_for_direction(price, True, risk_per_trade, signals_row)
 
     # ---------- Order lifecycle overrides (reset TP flags) ----------
-    def enter_long(self, timestamp: pd.Timestamp, price: float, size: float) -> None:
-        super().enter_long(timestamp, price, size)
+    def enter_long(self, timestamp: pd.Timestamp, price: float, size: float) -> str:
+        position_id = super().enter_long(timestamp, price, size)
         self._tp_hit_idx.clear()
         self._breakeven_triggered = False
+        return position_id
 
-    def enter_short(self, timestamp: pd.Timestamp, price: float, size: float) -> None:
-        super().enter_short(timestamp, price, size)
+    def enter_short(self, timestamp: pd.Timestamp, price: float, size: float) -> str:
+        position_id = super().enter_short(timestamp, price, size)
         self._tp_hit_idx.clear()
         self._breakeven_triggered = False
+        return position_id
 
-    def exit_long(self, timestamp: pd.Timestamp, price: float) -> None:
-        super().exit_long(timestamp, price)
-        self._tp_hit_idx.clear()
-        self._breakeven_triggered = False
+    def exit_long(self, timestamp: pd.Timestamp, price: float, size=None) -> str:
+        order_id = super().exit_long(timestamp, price, size)
+        if self.position == PositionType.FLAT:  # Position fully closed
+            self._tp_hit_idx.clear()
+            self._breakeven_triggered = False
+        return order_id
 
-    def exit_short(self, timestamp: pd.Timestamp, price: float) -> None:
-        super().exit_short(timestamp, price)
-        self._tp_hit_idx.clear()
-        self._breakeven_triggered = False
+    def exit_short(self, timestamp: pd.Timestamp, price: float, size=None) -> str:
+        order_id = super().exit_short(timestamp, price, size)
+        if self.position == PositionType.FLAT:  # Position fully closed
+            self._tp_hit_idx.clear()
+            self._breakeven_triggered = False
+        return order_id
 
     # ---------- Core lifecycle ----------
-    def check_stop_loss(self, row: pd.Series, timestamp: pd.Timestamp) -> bool:
-        if self.position == Position.FLAT:
+    def check_stop_loss(self, current_price_or_row, timestamp: pd.Timestamp) -> bool:
+        if self.position == PositionType.FLAT:
             return False
 
         ts = pd.to_datetime(timestamp)
         same_bar = (self.entry_time is not None and pd.to_datetime(self.entry_time) == ts)
 
         entry = float(self.entry_price)
+        
+        # Handle both float (current_price) and pd.Series (row) inputs
+        if isinstance(current_price_or_row, (int, float)):
+            current_price = float(current_price_or_row)
+            sl_frac = self.sl_percent / 100.0
+
+            if self.position == PositionType.LONG:
+                sl_price = entry * (1.0 - sl_frac)
+                if current_price <= sl_price and not same_bar:
+                    self.exit_long(ts, current_price)
+                    return True
+            elif self.position == PositionType.SHORT:
+                sl_price = entry * (1.0 + sl_frac)
+                if current_price >= sl_price and not same_bar:
+                    self.exit_short(ts, current_price)
+                    return True
+            return False
+
+        
+        # Original row-based logic for more complex stop loss
+        row = current_price_or_row
         low = float(row["low"])
         high = float(row["high"])
         open_ = float(row.get("open", np.nan))
@@ -229,33 +259,29 @@ class FibonacciChannelStrategy(BaseStrategy):
 
         # --- Breakeven logic (Pine parity): no BE exit on entry bar; require candle body direction ---
         if self._breakeven_triggered:
-            if self.position == Position.LONG and not same_bar:
+            if self.position == PositionType.LONG and not same_bar:
                 # For LONG: BE hit only if price revisits entry on a red/flat candle
                 if (low <= entry) and not (close_ >= open_):
                     self.exit_long(ts, entry)
-                    self._tp_hit_idx.clear()
                     return True
-            elif self.position == Position.SHORT and not same_bar:
+            elif self.position == PositionType.SHORT and not same_bar:
                 # For SHORT: BE hit only if price revisits entry on a green/flat candle
                 if (high >= entry) and not (close_ <= open_):
                     self.exit_short(ts, entry)
-                    self._tp_hit_idx.clear()
                     return True
             return False
 
         # --- Regular SL (block same-bar stops like Pine) ---
         sl_frac = self.sl_percent / 100.0
-        if self.position == Position.LONG:
+        if self.position == PositionType.LONG:
             sl_price = entry * (1.0 - sl_frac) if self.fixed_stop else float(row.get("fib_786", entry)) * (1.0 - sl_frac)
             if (low <= sl_price) and not same_bar:
                 self.exit_long(ts, sl_price)
-                self._tp_hit_idx.clear()
                 return True
         else:  # SHORT
             sl_price = entry * (1.0 + sl_frac) if self.fixed_stop else float(row.get("fib_236", entry)) * (1.0 + sl_frac)
             if (high >= sl_price) and not same_bar:
                 self.exit_short(ts, sl_price)
-                self._tp_hit_idx.clear()
                 return True
 
         return False
@@ -268,12 +294,22 @@ class FibonacciChannelStrategy(BaseStrategy):
         # This method is now deprecated - breakeven logic moved to check_take_profits()
         pass
 
-    def check_take_profits(self, row: pd.Series, timestamp: pd.Timestamp) -> None:
+    def check_take_profits(self, current_price_or_row, timestamp: pd.Timestamp) -> None:
         """Intrabar TP checks (use high/low)."""
-        if not self.use_take_profits or self.position == Position.FLAT or self.current_size <= 0:
+        if not self.use_take_profits or self.position == PositionType.FLAT or self.current_size <= 0:
             return
 
-        entry, low, high = self.entry_price, row["low"], row["high"]
+        entry = self.entry_price
+        
+        # Handle both float (current_price) and pd.Series (row) inputs  
+        if isinstance(current_price_or_row, (int, float)):
+            # For simple price input, use current price as both high and low
+            current_price = float(current_price_or_row)
+            low = high = current_price
+        else:
+            # Original row-based logic for intrabar high/low
+            row = current_price_or_row
+            low, high = row["low"], row["high"]
 
         for idx, (tp_pct, close_frac) in enumerate(self.tp_levels):
             if idx in self._tp_hit_idx:
@@ -281,7 +317,7 @@ class FibonacciChannelStrategy(BaseStrategy):
 
             target_hit = False
             target_price = None
-            if self.position == Position.LONG:
+            if self.position == PositionType.LONG:
                 target_price = entry * (1.0 + tp_pct / 100.0)
                 target_hit = high >= target_price
             else:
@@ -291,33 +327,19 @@ class FibonacciChannelStrategy(BaseStrategy):
             if not target_hit:
                 continue
 
-            # Partial close
+            # Partial close using new order system
             base = self.original_position_size or self.current_size
             size_to_exit = min(base * close_frac, self.current_size)
             if size_to_exit <= 0:
                 self._tp_hit_idx.add(idx)
                 continue
 
-            exit_value = target_price * size_to_exit
-            entry_value = entry * size_to_exit
-            pnl = (exit_value - entry_value) if self.position == Position.LONG else (entry_value - exit_value)
-            fees = exit_value * self.commission_rate
-            slip = exit_value * self.slippage
-
-            partial = Trade(
-                entry_time=self.entry_time,
-                exit_time=timestamp,
-                entry_price=entry,
-                exit_price=target_price,
-                position=self.position,
-                size=size_to_exit,
-                pnl=pnl,
-                fees=fees,
-            )
-            self.current_size -= size_to_exit
-            self.current_capital += pnl - fees - slip
-            self.trades.append(partial)
-            self.equity_curve.append(self.current_capital)
+            # Execute partial exit using the new order system
+            if self.position == PositionType.LONG:
+                order_id = self.exit_long(timestamp, target_price, size_to_exit)
+            else:
+                order_id = self.exit_short(timestamp, target_price, size_to_exit)
+            
             self._tp_hit_idx.add(idx)
 
             # Trigger breakeven if configured
@@ -326,13 +348,8 @@ class FibonacciChannelStrategy(BaseStrategy):
                 not self._breakeven_triggered):
                 self._breakeven_triggered = True
 
-            # If flat after TP, exit fully
-            if self.current_size <= 1e-9:
-                if self.position == Position.LONG:
-                    self.exit_long(timestamp, target_price)
-                else:
-                    self.exit_short(timestamp, target_price)
-                self._tp_hit_idx.clear()
+            # Check if position is fully closed after partial exit
+            if self.position == PositionType.FLAT:
                 break
 
     # ---------- Risk-Reward helper ----------

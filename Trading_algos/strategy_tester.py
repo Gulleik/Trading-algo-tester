@@ -23,7 +23,7 @@ except NameError:
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-from strategies.base_strategy import BaseStrategy, Position
+from strategies.base_strategy import BaseStrategy, PositionType
 
 
 class StrategyTester:
@@ -103,7 +103,13 @@ class StrategyTester:
             print("Generating trading signals...")
         
         signals_data = strategy.generate_signals(data)
-        
+        if verbose:
+            print("Signals — long:", int(signals_data["long_signal"].sum()),
+                "short:", int(signals_data["short_signal"].sum()))
+            # show first few bars that try to enter
+            first_longs  = signals_data.index[signals_data["long_signal"]].tolist()[:3]
+            first_shorts = signals_data.index[signals_data["short_signal"]].tolist()[:3]
+            print("First long idx:", first_longs, "First short idx:", first_shorts)
         # Run backtest
         if verbose:
             print("Running backtest simulation...")
@@ -123,41 +129,36 @@ class StrategyTester:
             # Ensure timestamp is a pandas Timestamp object
             actual_timestamp = pd.to_datetime(actual_timestamp)
             
-            # Check for stop loss first (highest priority)
-            # ✅ correct (pass the whole row so strategy can check high/low/open/close)
-            if hasattr(strategy, 'check_stop_loss') and strategy.position != Position.FLAT:
+            # Stop-loss & TPs (row, not price)
+            if hasattr(strategy, 'check_stop_loss') and strategy.position != PositionType.FLAT:
                 if strategy.check_stop_loss(row, actual_timestamp):
                     continue
 
-            if hasattr(strategy, 'check_take_profits') and strategy.position != Position.FLAT:
+            if hasattr(strategy, 'check_take_profits') and strategy.position != PositionType.FLAT:
                 strategy.check_take_profits(row, actual_timestamp)
 
-            
-            # Check for entry/exit signals
-            if strategy.position == strategy.position.FLAT:
-                # Check for entry signals
+            # Entries -> size with the same row (so fib SL is correct)
+            if strategy.position == PositionType.FLAT:
                 if strategy.should_enter_long(row, signals_data):
-                    # Calculate position size for long trade
-                    if hasattr(strategy, 'calculate_position_size_for_direction'):
-                        size = strategy.calculate_position_size_for_direction(current_price, True, signals_row=row)
-                    else:
-                        size = strategy.calculate_position_size(current_price, signals_row=row)
-                    strategy.enter_long(actual_timestamp, current_price, size)
-                
+                    size = (strategy.calculate_position_size_for_direction(current_price, True,  signals_row=row)
+                            if hasattr(strategy, 'calculate_position_size_for_direction')
+                            else strategy.calculate_position_size(current_price))
+                    if size > 0:
+                        strategy.enter_long(actual_timestamp, current_price, size)
+
                 elif strategy.should_enter_short(row, signals_data):
-                    # Calculate position size for short trade
-                    if hasattr(strategy, 'calculate_position_size_for_direction'):
-                        size = strategy.calculate_position_size_for_direction(current_price, False, signals_row=row)
-                    else:
-                        size = strategy.calculate_position_size(current_price, signals_row=row)
-                    strategy.enter_short(actual_timestamp, current_price, size)
+                    size = (strategy.calculate_position_size_for_direction(current_price, False, signals_row=row)
+                            if hasattr(strategy, 'calculate_position_size_for_direction')
+                            else strategy.calculate_position_size(current_price))
+                    if size > 0:
+                        strategy.enter_short(actual_timestamp, current_price, size)
             
-            elif strategy.position == strategy.position.LONG:
+            elif strategy.position == PositionType.LONG:
                 # Check for exit signals
                 if strategy.should_exit_long(row, signals_data):
                     strategy.exit_long(actual_timestamp, current_price)
             
-            elif strategy.position == strategy.position.SHORT:
+            elif strategy.position == PositionType.SHORT:
                 # Check for exit signals
                 if strategy.should_exit_short(row, signals_data):
                     strategy.exit_short(actual_timestamp, current_price)
@@ -171,10 +172,10 @@ class StrategyTester:
                 })
         
         # Close any open positions at the end
-        if strategy.position != strategy.position.FLAT:
+        if strategy.position != PositionType.FLAT:
             final_price = data.iloc[-1]['close']
             final_timestamp = pd.to_datetime(data.iloc[-1]['timestamp'])
-            if strategy.position == strategy.position.LONG:
+            if strategy.position == PositionType.LONG:
                 strategy.exit_long(final_timestamp, final_price)
             else:
                 strategy.exit_short(final_timestamp, final_price)
@@ -299,10 +300,10 @@ class StrategyTester:
         ax1.plot(data['timestamp'], data['close'], label='Price', alpha=0.7, linewidth=1)
         
         # Plot buy/sell signals
-        buy_signals = [(t.entry_time, t.entry_price) for t in trades if t.position == Position.LONG]
-        sell_signals = [(t.exit_time, t.exit_price) for t in trades if t.position == Position.LONG and t.exit_time]
-        short_signals = [(t.entry_time, t.entry_price) for t in trades if t.position == Position.SHORT]
-        cover_signals = [(t.exit_time, t.exit_price) for t in trades if t.position == Position.SHORT and t.exit_time]
+        buy_signals = [(t.entry_time, t.entry_price) for t in trades if t.position == PositionType.LONG]
+        sell_signals = [(t.exit_time, t.exit_price) for t in trades if t.position == PositionType.LONG and t.exit_time]
+        short_signals = [(t.entry_time, t.entry_price) for t in trades if t.position == PositionType.SHORT]
+        cover_signals = [(t.exit_time, t.exit_price) for t in trades if t.position == PositionType.SHORT and t.exit_time]
         
         if buy_signals:
             buy_times, buy_prices = zip(*buy_signals)

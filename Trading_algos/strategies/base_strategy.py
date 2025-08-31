@@ -6,29 +6,122 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+import uuid
 
 
-class Position(Enum):
+class PositionType(Enum):
     """Position types for trading."""
     LONG = "long"
     SHORT = "short"
     FLAT = "flat"
 
 
+class OrderType(Enum):
+    """Order types for position management."""
+    MARKET_BUY = "market_buy"
+    MARKET_SELL = "market_sell"
+    STOP_LOSS = "stop_loss"
+    TAKE_PROFIT = "take_profit"
+    PARTIAL_CLOSE = "partial_close"
+    FULL_CLOSE = "full_close"
+
+
+@dataclass
+class Order:
+    """Represents a single order (buy/sell action)."""
+    order_id: str
+    timestamp: pd.Timestamp
+    order_type: OrderType
+    price: float
+    size: float
+    position_id: Optional[str] = None  # Links order to position
+    fees: float = 0.0
+    slippage: float = 0.0
+    pnl: float = 0.0  # PnL for this specific order
+    
+    def __post_init__(self):
+        if not self.order_id:
+            self.order_id = str(uuid.uuid4())[:8]
+
+
+@dataclass
+class Position:
+    """Represents a trading position (can have multiple orders)."""
+    position_id: str
+    position_type: PositionType
+    entry_time: pd.Timestamp
+    entry_price: float
+    initial_size: float
+    current_size: float = 0.0
+    exit_time: Optional[pd.Timestamp] = None
+    average_exit_price: Optional[float] = None
+    total_pnl: float = 0.0
+    total_fees: float = 0.0
+    orders: List[Order] = field(default_factory=list)
+    is_closed: bool = False
+    
+    def __post_init__(self):
+        if not self.position_id:
+            self.position_id = str(uuid.uuid4())[:8]
+        if self.current_size == 0.0:
+            self.current_size = self.initial_size
+    
+    def add_order(self, order: Order) -> None:
+        """Add an order to this position."""
+        order.position_id = self.position_id
+        self.orders.append(order)
+        self.total_fees += order.fees
+        
+        # Update position based on order type
+        if order.order_type in [OrderType.MARKET_SELL, OrderType.PARTIAL_CLOSE, 
+                               OrderType.FULL_CLOSE, OrderType.STOP_LOSS, OrderType.TAKE_PROFIT]:
+            self.current_size -= order.size
+            self.total_pnl += order.pnl
+            
+            # Check if position is fully closed
+            if self.current_size <= 0.001:  # Small threshold for floating point errors
+                self.is_closed = True
+                self.exit_time = order.timestamp
+                self._calculate_average_exit_price()
+    
+    def _calculate_average_exit_price(self) -> None:
+        """Calculate the average exit price from all exit orders."""
+        exit_orders = [o for o in self.orders if o.order_type in [
+            OrderType.MARKET_SELL, OrderType.PARTIAL_CLOSE, OrderType.FULL_CLOSE,
+            OrderType.STOP_LOSS, OrderType.TAKE_PROFIT
+        ]]
+        
+        if exit_orders:
+            total_value = sum(o.price * o.size for o in exit_orders)
+            total_size = sum(o.size for o in exit_orders)
+            self.average_exit_price = total_value / total_size if total_size > 0 else None
+    
+    def get_unrealized_pnl(self, current_price: float) -> float:
+        """Calculate unrealized PnL for remaining position size."""
+        if self.is_closed or self.current_size <= 0:
+            return 0.0
+        
+        if self.position_type == PositionType.LONG:
+            return (current_price - self.entry_price) * self.current_size
+        else:  # SHORT
+            return (self.entry_price - current_price) * self.current_size
+
+
+# Legacy Trade class for backward compatibility
 @dataclass
 class Trade:
-    """Represents a single trade."""
+    """Legacy trade class - kept for backward compatibility."""
     entry_time: pd.Timestamp
     exit_time: Optional[pd.Timestamp] = None
     entry_price: float = 0.0
     exit_price: Optional[float] = None
-    position: Position = Position.FLAT
+    position: PositionType = PositionType.FLAT
     size: float = 0.0
     pnl: float = 0.0
     fees: float = 0.0
-
+    
 
 class BaseStrategy(ABC):
     """
@@ -55,17 +148,23 @@ class BaseStrategy(ABC):
         self.commission_rate = commission_rate
         self.slippage = slippage
         
-        # Strategy state
-        self.position = Position.FLAT
+                # Strategy state - maintaining legacy compatibility
+        self.position = PositionType.FLAT  # Legacy compatibility
         self.entry_price = 0.0
         self.entry_time = None
         self.current_size = 0.0
         
-        # Partial position management
+        # Partial position management (legacy compatibility)
         self.original_position_size = 0.0
         self.remaining_position_size = 0.0
         
-        # Trade history
+        # Enhanced position/order tracking (new system)
+        self.current_position_type = PositionType.FLAT
+        self.current_position: Optional[Position] = None
+        self.positions: List[Position] = []
+        self.orders: List[Order] = []
+        
+        # Legacy trade history
         self.trades: List[Trade] = []
         self.current_trade: Optional[Trade] = None
         
@@ -122,141 +221,293 @@ class BaseStrategy(ABC):
         position_value = risk_amount * self.leverage
         return position_value / price
     
-    def enter_long(self, timestamp: pd.Timestamp, price: float, size: float) -> None:
-        """Enter a long position."""
-        if self.position != Position.FLAT:
-            return  # Already in a position
+    def enter_long(self, timestamp: pd.Timestamp, price: float, size: float) -> str:
+        """Enter a long position. Returns position_id."""
+        if self.position != PositionType.FLAT:
+            return ""  # Already in a position
             
         # Calculate fees and slippage
         entry_value = price * size
         fees = entry_value * self.commission_rate
         slippage_cost = entry_value * self.slippage
         
-        # Update state
-        self.position = Position.LONG
+        # Update legacy state (for compatibility)
+        self.position = PositionType.LONG
         self.entry_price = price
         self.entry_time = timestamp
         self.current_size = size
         self.original_position_size = size
         self.remaining_position_size = size
         
-        # Create trade record
+        # Create legacy trade record
         self.current_trade = Trade(
             entry_time=timestamp,
             entry_price=price,
-            position=Position.LONG,
+            position=PositionType.LONG,
             size=size,
             fees=fees
         )
+        
+        # Create new position for enhanced tracking
+        position = Position(
+            position_id=str(uuid.uuid4())[:8],
+            position_type=PositionType.LONG,
+            entry_time=timestamp,
+            entry_price=price,
+            initial_size=size,
+            current_size=size
+        )
+        
+        # Create entry order
+        entry_order = Order(
+            order_id=str(uuid.uuid4())[:8],
+            timestamp=timestamp,
+            order_type=OrderType.MARKET_BUY,
+            price=price,
+            size=size,
+            fees=fees,
+            slippage=slippage_cost
+        )
+        
+        # Link order to position
+        position.add_order(entry_order)
+        
+        # Update enhanced state
+        self.current_position_type = PositionType.LONG
+        self.current_position = position
+        self.positions.append(position)
+        self.orders.append(entry_order)
         
         # Update capital
         self.current_capital -= fees + slippage_cost
         
         # Update equity curve
         self.equity_curve.append(self.current_capital)
+        
+        return position.position_id
     
-    def exit_long(self, timestamp: pd.Timestamp, price: float) -> None:
-        """Exit a long position."""
-        if self.position != Position.LONG or not self.current_trade:
-            return
+    def exit_long(self, timestamp: pd.Timestamp, price: float, size: Optional[float] = None) -> str:
+        """Exit a long position (fully or partially). Returns order_id."""
+        if self.position != PositionType.LONG or not self.current_trade:
+            return ""
+        
+        # Default to closing entire remaining position
+        if size is None:
+            size = self.current_size
+        
+        # Ensure we don't close more than available
+        size = min(size, self.current_size)
+        
+        if size <= 0:
+            return ""
             
         # Calculate PnL and costs
-        exit_value = price * self.current_size
-        entry_value = self.entry_price * self.current_size
+        exit_value = price * size
+        entry_value = self.entry_price * size
         pnl = exit_value - entry_value
         
         fees = exit_value * self.commission_rate
         slippage_cost = exit_value * self.slippage
-        
-        # Update trade record
-        self.current_trade.exit_time = timestamp
-        self.current_trade.exit_price = price
-        self.current_trade.pnl = pnl
+        self.current_trade.pnl  += pnl
         self.current_trade.fees += fees
+        # Determine if this is a full or partial close
+        is_full_close = size >= self.current_size - 0.001
+        order_type = OrderType.FULL_CLOSE if is_full_close else OrderType.PARTIAL_CLOSE
         
-        # Update state
-        self.position = Position.FLAT
-        self.entry_price = 0.0
-        self.entry_time = None
-        self.current_size = 0.0
+        # Create exit order for enhanced tracking
+        exit_order = Order(
+            order_id=str(uuid.uuid4())[:8],
+            timestamp=timestamp,
+            order_type=order_type,
+            price=price,
+            size=size,
+            fees=fees,
+            slippage=slippage_cost,
+            pnl=pnl
+        )
+        
+        # Update enhanced tracking
+        if self.current_position:
+            self.current_position.add_order(exit_order)
+        self.orders.append(exit_order)
+        
+        # Update legacy state
+        self.current_size -= size
         
         # Update capital
         self.current_capital += pnl - fees - slippage_cost
         
-        # Store completed trade
-        self.trades.append(self.current_trade)
-        self.current_trade = None
+        # Check if position is fully closed
+        if is_full_close or self.current_size <= 0.001:
+            # Update legacy trade record
+            self.current_trade.exit_time  = timestamp
+            self.current_trade.exit_price = price
+            
+            # Reset legacy state
+            self.position = PositionType.FLAT
+            self.entry_price = 0.0
+            self.entry_time = None
+            self.current_size = 0.0
+            
+            # Store completed trade
+            self.trades.append(self.current_trade)
+            self.current_trade = None
+            
+            # Reset enhanced state
+            self.current_position_type = PositionType.FLAT
+            if self.current_position:
+                self.current_position.is_closed = True
+                self.current_position.exit_time = timestamp
+            self.current_position = None
         
         # Update equity curve
         self.equity_curve.append(self.current_capital)
+        
+        return exit_order.order_id
     
-    def enter_short(self, timestamp: pd.Timestamp, price: float, size: float) -> None:
-        """Enter a short position."""
-        if self.position != Position.FLAT:
-            return  # Already in a position
+    def enter_short(self, timestamp: pd.Timestamp, price: float, size: float) -> str:
+        """Enter a short position. Returns position_id."""
+        if self.position != PositionType.FLAT:
+            return ""  # Already in a position
             
         # Calculate fees and slippage
         entry_value = price * size
         fees = entry_value * self.commission_rate
         slippage_cost = entry_value * self.slippage
         
-        # Update state
-        self.position = Position.SHORT
+        # Update legacy state (for compatibility)
+        self.position = PositionType.SHORT
         self.entry_price = price
         self.entry_time = timestamp
         self.current_size = size
         self.original_position_size = size
         self.remaining_position_size = size
         
-        # Create trade record
+        # Create legacy trade record
         self.current_trade = Trade(
             entry_time=timestamp,
             entry_price=price,
-            position=Position.SHORT,
+            position=PositionType.SHORT,
             size=size,
             fees=fees
         )
+        
+        # Create new position for enhanced tracking
+        position = Position(
+            position_id=str(uuid.uuid4())[:8],
+            position_type=PositionType.SHORT,
+            entry_time=timestamp,
+            entry_price=price,
+            initial_size=size,
+            current_size=size
+        )
+        
+        # Create entry order
+        entry_order = Order(
+            order_id=str(uuid.uuid4())[:8],
+            timestamp=timestamp,
+            order_type=OrderType.MARKET_SELL,
+            price=price,
+            size=size,
+            fees=fees,
+            slippage=slippage_cost
+        )
+        
+        # Link order to position
+        position.add_order(entry_order)
+        
+        # Update enhanced state
+        self.current_position_type = PositionType.SHORT
+        self.current_position = position
+        self.positions.append(position)
+        self.orders.append(entry_order)
         
         # Update capital
         self.current_capital -= fees + slippage_cost
         
         # Update equity curve
         self.equity_curve.append(self.current_capital)
+        
+        return position.position_id
     
-    def exit_short(self, timestamp: pd.Timestamp, price: float) -> None:
-        """Exit a short position."""
-        if self.position != Position.SHORT or not self.current_trade:
-            return
+    def exit_short(self, timestamp: pd.Timestamp, price: float, size: Optional[float] = None) -> str:
+        """Exit a short position (fully or partially). Returns order_id."""
+        if self.position != PositionType.SHORT or not self.current_trade:
+            return ""
+        
+        # Default to closing entire remaining position
+        if size is None:
+            size = self.current_size
+        
+        # Ensure we don't close more than available
+        size = min(size, self.current_size)
+        
+        if size <= 0:
+            return ""
             
         # Calculate PnL and costs
-        exit_value = price * self.current_size
-        entry_value = self.entry_price * self.current_size
+        exit_value = price * size
+        entry_value = self.entry_price * size
         pnl = entry_value - exit_value  # Short: sell high, buy low
         
         fees = exit_value * self.commission_rate
         slippage_cost = exit_value * self.slippage
-        
-        # Update trade record
-        self.current_trade.exit_time = timestamp
-        self.current_trade.exit_price = price
-        self.current_trade.pnl = pnl
+        self.current_trade.pnl  += pnl
         self.current_trade.fees += fees
+        # Determine if this is a full or partial close
+        is_full_close = size >= self.current_size - 0.001
+        order_type = OrderType.FULL_CLOSE if is_full_close else OrderType.PARTIAL_CLOSE
         
-        # Update state
-        self.position = Position.FLAT
-        self.entry_price = 0.0
-        self.entry_time = None
-        self.current_size = 0.0
+        # Create exit order for enhanced tracking
+        exit_order = Order(
+            order_id=str(uuid.uuid4())[:8],
+            timestamp=timestamp,
+            order_type=order_type,
+            price=price,
+            size=size,
+            fees=fees,
+            slippage=slippage_cost,
+            pnl=pnl
+        )
+        
+        # Update enhanced tracking
+        if self.current_position:
+            self.current_position.add_order(exit_order)
+        self.orders.append(exit_order)
+        
+        # Update legacy state
+        self.current_size -= size
         
         # Update capital
         self.current_capital += pnl - fees - slippage_cost
         
-        # Store completed trade
-        self.trades.append(self.current_trade)
-        self.current_trade = None
+        # Check if position is fully closed
+        if is_full_close or self.current_size <= 0.001:
+            # Update legacy trade record
+            self.current_trade.exit_time  = timestamp
+            self.current_trade.exit_price = price
+            
+            # Reset legacy state
+            self.position = PositionType.FLAT
+            self.entry_price = 0.0
+            self.entry_time = None
+            self.current_size = 0.0
+            
+            # Store completed trade
+            self.trades.append(self.current_trade)
+            self.current_trade = None
+            
+            # Reset enhanced state
+            self.current_position_type = PositionType.FLAT
+            if self.current_position:
+                self.current_position.is_closed = True
+                self.current_position.exit_time = timestamp
+            self.current_position = None
         
         # Update equity curve
         self.equity_curve.append(self.current_capital)
+        
+        return exit_order.order_id
     
     def get_performance_metrics(self) -> Dict[str, Any]:
         """Calculate and return comprehensive performance metrics."""
@@ -289,7 +540,7 @@ class BaseStrategy(ABC):
                 'var_95': 0.0
             }
         
-        # Basic metrics
+        # Basic metrics - use legacy trades for backward compatibility
         total_return = (self.current_capital - self.initial_capital) / self.initial_capital
         winning_trades = [t for t in self.trades if t.pnl > 0]
         losing_trades = [t for t in self.trades if t.pnl < 0]
@@ -431,6 +682,10 @@ class BaseStrategy(ABC):
         else:
             calmar_ratio = 0
         
+        # Calculate position-level and order-level metrics
+        position_metrics = self._calculate_position_metrics()
+        order_metrics = self._calculate_order_metrics()
+        
         return {
             'total_return': total_return,
             'win_rate': win_rate,
@@ -457,19 +712,164 @@ class BaseStrategy(ABC):
             'largest_win': largest_win,
             'largest_loss': largest_loss,
             'volatility': volatility,
-            'var_95': var_95
+            'var_95': var_95,
+            # New position-level metrics
+            'position_metrics': position_metrics,
+            'order_metrics': order_metrics
         }
+    
+    def _calculate_position_metrics(self) -> Dict[str, Any]:
+        """Calculate metrics specific to positions."""
+        if not self.positions:
+            return {
+                'total_positions': 0,
+                'positions_with_partial_exits': 0,
+                'avg_orders_per_position': 0.0,
+                'avg_position_duration': 0.0,
+                'partial_exit_efficiency': 0.0
+            }
+        
+        closed_positions = [p for p in self.positions if p.is_closed]
+        
+        # Count positions with partial exits (more than 2 orders: entry + multiple exits)
+        positions_with_partial_exits = sum(1 for p in closed_positions if len(p.orders) > 2)
+        
+        # Average orders per position
+        avg_orders_per_position = sum(len(p.orders) for p in self.positions) / len(self.positions)
+        
+        # Average position duration
+        if closed_positions:
+            durations = []
+            for pos in closed_positions:
+                if pos.exit_time and pos.entry_time:
+                    duration = (pos.exit_time - pos.entry_time).total_seconds() / 3600  # hours
+                    durations.append(duration)
+            avg_position_duration = np.mean(durations) if durations else 0.0
+        else:
+            avg_position_duration = 0.0
+        
+        # Partial exit efficiency (PnL from partial exits vs full position PnL)
+        partial_exit_pnl = 0.0
+        total_position_pnl = 0.0
+        for pos in closed_positions:
+            partial_orders = [o for o in pos.orders if o.order_type == OrderType.PARTIAL_CLOSE]
+            partial_exit_pnl += sum(o.pnl for o in partial_orders)
+            total_position_pnl += pos.total_pnl
+        
+        partial_exit_efficiency = (partial_exit_pnl / total_position_pnl * 100) if total_position_pnl != 0 else 0.0
+        
+        return {
+            'total_positions': len(self.positions),
+            'positions_with_partial_exits': positions_with_partial_exits,
+            'avg_orders_per_position': avg_orders_per_position,
+            'avg_position_duration': avg_position_duration,
+            'partial_exit_efficiency': partial_exit_efficiency
+        }
+    
+    def _calculate_order_metrics(self) -> Dict[str, Any]:
+        """Calculate metrics specific to orders."""
+        if not self.orders:
+            return {
+                'total_orders': 0,
+                'entry_orders': 0,
+                'exit_orders': 0,
+                'partial_close_orders': 0,
+                'stop_loss_orders': 0,
+                'take_profit_orders': 0,
+                'avg_order_size': 0.0,
+                'order_type_distribution': {}
+            }
+        
+        # Count orders by type
+        order_counts = {}
+        for order_type in OrderType:
+            order_counts[order_type.value] = sum(1 for o in self.orders if o.order_type == order_type)
+        
+        entry_orders = order_counts.get('market_buy', 0) + order_counts.get('market_sell', 0)
+        exit_orders = len(self.orders) - entry_orders
+        
+        # Average order size
+        avg_order_size = sum(o.size for o in self.orders) / len(self.orders)
+        
+        return {
+            'total_orders': len(self.orders),
+            'entry_orders': entry_orders,
+            'exit_orders': exit_orders,
+            'partial_close_orders': order_counts.get('partial_close', 0),
+            'stop_loss_orders': order_counts.get('stop_loss', 0),
+            'take_profit_orders': order_counts.get('take_profit', 0),
+            'avg_order_size': avg_order_size,
+            'order_type_distribution': order_counts
+        }
+    
+    def get_current_position_info(self) -> Dict[str, Any]:
+        """Get information about the current open position."""
+        if not self.current_position or self.current_position_type == PositionType.FLAT:
+            return {'status': 'flat'}
+        
+        return {
+            'status': 'open',
+            'position_id': self.current_position.position_id,
+            'position_type': self.current_position.position_type.value,
+            'entry_price': self.current_position.entry_price,
+            'entry_time': self.current_position.entry_time,
+            'initial_size': self.current_position.initial_size,
+            'current_size': self.current_position.current_size,
+            'total_orders': len(self.current_position.orders),
+            'total_fees': self.current_position.total_fees,
+            'realized_pnl': self.current_position.total_pnl
+        }
+    
+    def get_position_history(self) -> List[Dict[str, Any]]:
+        """Get detailed history of all positions."""
+        history = []
+        for pos in self.positions:
+            pos_info = {
+                'position_id': pos.position_id,
+                'position_type': pos.position_type.value,
+                'entry_time': pos.entry_time,
+                'entry_price': pos.entry_price,
+                'initial_size': pos.initial_size,
+                'current_size': pos.current_size,
+                'exit_time': pos.exit_time,
+                'average_exit_price': pos.average_exit_price,
+                'total_pnl': pos.total_pnl,
+                'total_fees': pos.total_fees,
+                'is_closed': pos.is_closed,
+                'order_count': len(pos.orders),
+                'orders': [{
+                    'order_id': o.order_id,
+                    'timestamp': o.timestamp,
+                    'order_type': o.order_type.value,
+                    'price': o.price,
+                    'size': o.size,
+                    'fees': o.fees,
+                    'pnl': o.pnl
+                } for o in pos.orders]
+            }
+            history.append(pos_info)
+        return history
     
     def reset(self) -> None:
         """Reset strategy to initial state."""
         self.current_capital = self.initial_capital
-        self.position = Position.FLAT
+        
+        # Reset legacy state
+        self.position = PositionType.FLAT
         self.entry_price = 0.0
         self.entry_time = None
         self.current_size = 0.0
         self.original_position_size = 0.0
         self.remaining_position_size = 0.0
-        self.trades = []
         self.current_trade = None
+        
+        # Reset enhanced state
+        self.current_position_type = PositionType.FLAT
+        self.current_position = None
+        self.positions = []
+        self.orders = []
+        
+        # Reset shared state
+        self.trades = []
         self.equity_curve = [self.initial_capital]
         self.peak_capital = self.initial_capital
