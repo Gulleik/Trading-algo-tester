@@ -65,7 +65,7 @@ def create_test_data(n_points=100, start_price=100.0, volatility=0.02, trend=0.1
     return pd.DataFrame(data)
 
 
-def test_simple_ma_strategy(data=None, verbose=True):
+def test_simple_ma_strategy(data=None, verbose=True, timeframe="5m"):
     """
     Test Simple MA strategy with optimal parameters for signal generation.
     
@@ -88,7 +88,8 @@ def test_simple_ma_strategy(data=None, verbose=True):
         use_take_profits=True,
         stop_loss_pct=1.0,  # Wider stop loss to avoid premature exits
         risk_per_trade=0.01,  # Conservative sizing
-        verbose_trading=verbose
+        verbose_trading=verbose,
+        timeframe=timeframe
     )
     
     # Run backtest
@@ -119,7 +120,7 @@ def test_simple_ma_strategy(data=None, verbose=True):
     }
 
 
-def test_fibonacci_strategy(data=None, verbose=True):
+def test_fibonacci_strategy(data=None, verbose=True, timeframe="5m"):
     """
     Test Fibonacci strategy with optimal parameters for signal generation.
     
@@ -143,7 +144,8 @@ def test_fibonacci_strategy(data=None, verbose=True):
         tp1_pct=0.5, tp1_close=25.0,
         tp2_pct=1.0, tp2_close=25.0,
         tp3_pct=1.5, tp3_close=50.0,
-        risk_per_trade=0.01  # Conservative sizing
+        risk_per_trade=0.01,  # Conservative sizing
+        timeframe=timeframe
     )
     
     # Run backtest

@@ -41,7 +41,8 @@ class SimpleMAStrategy(BaseStrategy):
                  initial_capital: float = 10000.0, leverage: float = 1.0,
                  commission_rate: float = 0.001, slippage: float = 0.0005,
                  use_take_profits: bool = True, stop_loss_pct: float = 0.5,
-                 risk_per_trade: float = 0.02, verbose_trading: bool = False):
+                 risk_per_trade: float = 0.02, verbose_trading: bool = False,
+                 timeframe: str = "5m"):
         """
         Initialize the Advanced Simple MA Strategy.
         
@@ -59,7 +60,7 @@ class SimpleMAStrategy(BaseStrategy):
             risk_per_trade: Risk per trade as percentage of equity (default: 2.0%)
             verbose_trading: Whether to print detailed trade entry/exit information
         """
-        super().__init__(name, initial_capital, leverage, commission_rate, slippage)
+        super().__init__(name, initial_capital, leverage, commission_rate, slippage, timeframe)
         
         # Strategy parameters
         self.fast_period = fast_period

@@ -170,6 +170,18 @@ class StrategyTester:
                     'Capital': f"${strategy.current_capital:,.0f}",
                     'Position': strategy.position.name
                 })
+            # Track per-bar equity (capital + unrealized PnL)
+            if strategy.position == PositionType.LONG:
+                unreal = (row['close'] - strategy.entry_price) * strategy.current_size
+            elif strategy.position == PositionType.SHORT:
+                unreal = (strategy.entry_price - row['close']) * strategy.current_size
+            else:
+                unreal = 0.0
+            strategy_bar_equity = strategy.current_capital + unreal
+            # store it somewhere accessible, e.g. on the strategy:
+            if not hasattr(strategy, 'bar_equity'):
+                strategy.bar_equity = []
+            strategy.bar_equity.append((actual_timestamp, strategy_bar_equity))
         
         # Close any open positions at the end
         if strategy.position != PositionType.FLAT:
@@ -480,7 +492,7 @@ class StrategyTester:
                 "Market Exposure": f"{metrics['exposure_percentage']:.2f}%",
                 "Break-even": f"{metrics['break_even_point']:.2%}",
                 "Total Fees": f"${metrics['total_fees']:,.2f}",
-                "Fees %": f"{metrics['total_fees']/metrics['final_capital']*100:.2%}"
+                "Fees %": f"{metrics['total_fees']/metrics['final_capital']:.2%}"
             }
         }
         

@@ -37,8 +37,9 @@ class FibonacciChannelStrategy(BaseStrategy):
                  tp2_pct: float = 1.00, tp2_close: float = 25.0,
                  tp3_pct: float = 1.50, tp3_close: float = 25.0,
                  tp4_pct: float = 2.00, tp4_close: float = 25.0,
-                 risk_per_trade: float = 0.02):
-        super().__init__(name, initial_capital, leverage, commission_rate, slippage)
+                 risk_per_trade: float = 0.02,
+                 timeframe: str = "5m"):
+        super().__init__(name, initial_capital, leverage, commission_rate, slippage, timeframe)
 
         self.sensitivity = int(sensitivity)
         if fixed_stop and sl_percent <= 0:
@@ -71,11 +72,14 @@ class FibonacciChannelStrategy(BaseStrategy):
             df = df.sort_values("timestamp").reset_index(drop=True)
 
         lookback = max(1, int(self.sensitivity * 10))
-        # Pine-like behavior: use whatever bars are available (no NaNs on early bars)
-        high_lv = df["high"].rolling(lookback, min_periods=1).max()
-        low_lv  = df["low"].rolling(lookback, min_periods=1).min()
+        
+        # Calculate rolling max/min with full lookback requirement
+        # Use min_periods=lookback to ensure we have complete lookback before starting
+        high_lv = df["high"].rolling(lookback, min_periods=lookback).max()
+        low_lv  = df["low"].rolling(lookback, min_periods=lookback).min()
         rng = (high_lv - low_lv).clip(lower=1e-12)
 
+        # Calculate Fibonacci levels (will be NaN for first lookback-1 rows)
         df["fib_236"] = high_lv - rng * 0.236
         df["fib_382"] = high_lv - rng * 0.382
         df["fib_500"] = high_lv - rng * 0.5
@@ -83,7 +87,7 @@ class FibonacciChannelStrategy(BaseStrategy):
         df["fib_786"] = high_lv - rng * 0.786
         df["imba_trend_line"] = df["fib_500"]
 
-        # Stateful regime detection (matches Pine's regime flip behavior)
+        # Initialize signal columns
         df["long_signal"] = False
         df["short_signal"] = False
         df["trend_long"] = False
@@ -92,11 +96,18 @@ class FibonacciChannelStrategy(BaseStrategy):
         in_long = False
         in_short = False
 
-        for i in range(len(df)):
+        # Start signal generation only after we have complete lookback data
+        start_index = lookback - 1  # First index with valid Fibonacci levels
+        
+        for i in range(start_index, len(df)):
             c = df["close"].iat[i]
             f236 = df["fib_236"].iat[i]
             f500 = df["fib_500"].iat[i]
             f786 = df["fib_786"].iat[i]
+            
+            # Skip if any Fibonacci levels are NaN (shouldn't happen with proper min_periods, but safety check)
+            if pd.isna(f236) or pd.isna(f500) or pd.isna(f786):
+                continue
 
             # Only arm a new long/short when we are NOT already in that regime
             can_long  = (c >= f500) and (c >= f236) and (not in_long)
@@ -121,13 +132,25 @@ class FibonacciChannelStrategy(BaseStrategy):
 
     # ---------- Decision hooks ----------
     def should_enter_long(self, row: pd.Series, signals: pd.DataFrame) -> bool:
-        return bool(row.get("long_signal", False) and self.position == PositionType.FLAT)
+        # Check that we have valid Fibonacci levels before allowing entry
+        has_valid_fibs = (not pd.isna(row.get("fib_236", np.nan)) and 
+                         not pd.isna(row.get("fib_500", np.nan)) and 
+                         not pd.isna(row.get("fib_786", np.nan)))
+        return bool(row.get("long_signal", False) and 
+                   self.position == PositionType.FLAT and 
+                   has_valid_fibs)
 
     def should_exit_long(self, row: pd.Series, signals: pd.DataFrame) -> bool:
         return bool(row.get("exit_long_signal", False))
 
     def should_enter_short(self, row: pd.Series, signals: pd.DataFrame) -> bool:
-        return bool(row.get("short_signal", False) and self.position == PositionType.FLAT)
+        # Check that we have valid Fibonacci levels before allowing entry
+        has_valid_fibs = (not pd.isna(row.get("fib_236", np.nan)) and 
+                         not pd.isna(row.get("fib_500", np.nan)) and 
+                         not pd.isna(row.get("fib_786", np.nan)))
+        return bool(row.get("short_signal", False) and 
+                   self.position == PositionType.FLAT and 
+                   has_valid_fibs)
 
     def should_exit_short(self, row: pd.Series, signals: pd.DataFrame) -> bool:
         return bool(row.get("exit_short_signal", False))

@@ -130,7 +130,7 @@ class BaseStrategy(ABC):
     
     def __init__(self, name: str, initial_capital: float = 10000.0, 
                  leverage: float = 1.0, commission_rate: float = 0.001,
-                 slippage: float = 0.0005):
+                 slippage: float = 0.0005, timeframe: str = "5m"):
         """
         Initialize the base strategy.
         
@@ -140,6 +140,7 @@ class BaseStrategy(ABC):
             leverage: Leverage multiplier for position sizing
             commission_rate: Commission rate as decimal (0.001 = 0.1%)
             slippage: Slippage rate as decimal (0.0005 = 0.05%)
+            timeframe: Data timeframe (e.g., "1m", "5m", "15m", "1h", "4h", "1d")
         """
         self.name = name
         self.initial_capital = initial_capital
@@ -147,6 +148,7 @@ class BaseStrategy(ABC):
         self.leverage = leverage
         self.commission_rate = commission_rate
         self.slippage = slippage
+        self.timeframe = timeframe
         
                 # Strategy state - maintaining legacy compatibility
         self.position = PositionType.FLAT  # Legacy compatibility
@@ -171,6 +173,19 @@ class BaseStrategy(ABC):
         # Performance tracking
         self.equity_curve: List[float] = [initial_capital]
         self.peak_capital = initial_capital
+    
+    def _timeframe_to_minutes(self) -> int:
+        """Convert timeframe string to minutes for exposure calculations."""
+        timeframe_map = {
+            "1m": 1,
+            "5m": 5,
+            "15m": 15,
+            "30m": 30,
+            "1h": 60,
+            "4h": 240,
+            "1d": 1440
+        }
+        return timeframe_map.get(self.timeframe, 5)  # Default to 5 minutes if unknown
         
     @abstractmethod
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -510,7 +525,8 @@ class BaseStrategy(ABC):
         return exit_order.order_id
     
     def get_performance_metrics(self) -> Dict[str, Any]:
-        """Calculate and return comprehensive performance metrics."""
+        """Calculate and return comprehensive performance metrics (per-bar aware)."""
+        # Empty result when no trades at all
         if not self.trades:
             return {
                 'total_return': 0.0,
@@ -523,6 +539,7 @@ class BaseStrategy(ABC):
                 'avg_win': 0.0,
                 'avg_loss': 0.0,
                 'max_consecutive_losses': 0,
+                'max_consecutive_wins': 0,
                 'final_capital': self.current_capital,
                 'risk_reward_ratio': 0.0,
                 'exposure_percentage': 0.0,
@@ -537,155 +554,134 @@ class BaseStrategy(ABC):
                 'largest_win': 0.0,
                 'largest_loss': 0.0,
                 'volatility': 0.0,
-                'var_95': 0.0
+                'var_95': 0.0,
+                'position_metrics': {'total_positions': 0, 'positions_with_partial_exits': 0,
+                                    'avg_orders_per_position': 0.0, 'avg_position_duration': 0.0,
+                                    'partial_exit_efficiency': 0.0},
+                'order_metrics': {'total_orders': 0, 'entry_orders': 0, 'exit_orders': 0,
+                                'partial_close_orders': 0, 'stop_loss_orders': 0,
+                                'take_profit_orders': 0, 'avg_order_size': 0.0,
+                                'order_type_distribution': {}}
             }
-        
-        # Basic metrics - use legacy trades for backward compatibility
+
+        # ---------- Basic P/L tallies ----------
         total_return = (self.current_capital - self.initial_capital) / self.initial_capital
         winning_trades = [t for t in self.trades if t.pnl > 0]
-        losing_trades = [t for t in self.trades if t.pnl < 0]
-        
-        win_rate = len(winning_trades) / len(self.trades) if self.trades else 0
-        
-        # Profit factor and R:R ratio
-        total_wins = sum(t.pnl for t in winning_trades)
+        losing_trades  = [t for t in self.trades if t.pnl < 0]
+        win_rate = len(winning_trades) / len(self.trades) if self.trades else 0.0
+
+        total_wins   = sum(t.pnl for t in winning_trades)
         total_losses = abs(sum(t.pnl for t in losing_trades))
         profit_factor = total_wins / total_losses if total_losses > 0 else float('inf')
-        
-        # Average win/loss and R:R ratio
-        avg_win = total_wins / len(winning_trades) if winning_trades else 0
-        avg_loss = total_losses / len(losing_trades) if losing_trades else 0
-        risk_reward_ratio = avg_win / avg_loss if avg_loss > 0 else 0
-        
-        # Max drawdown and peak analysis
-        drawdowns = []
-        peak = self.initial_capital
-        for capital in self.equity_curve:
-            if capital > peak:
-                peak = capital
-            drawdown = (peak - capital) / peak
-            drawdowns.append(drawdown)
-        max_drawdown = max(drawdowns) if drawdowns else 0
-        
-        # Risk-adjusted returns
-        returns = np.diff(self.equity_curve) / self.equity_curve[:-1]
-        if len(returns) > 1:
-            mean_return = np.mean(returns)
-            std_return = np.std(returns)
-            sharpe_ratio = mean_return / std_return if std_return > 0 else 0
-            
-            # Sortino ratio (downside deviation only)
-            downside_returns = returns[returns < 0]
-            downside_std = np.std(downside_returns) if len(downside_returns) > 1 else 0
-            sortino_ratio = mean_return / downside_std if downside_std > 0 else 0
-            
-            # Volatility and VaR
-            volatility = std_return * np.sqrt(252 * 24 * 12) if self.trades else 0  # Annualized for 5m data
-            var_95 = np.percentile(returns, 5) if len(returns) > 0 else 0
+
+        avg_win = (total_wins / len(winning_trades)) if winning_trades else 0.0
+        avg_loss = (total_losses / len(losing_trades)) if losing_trades else 0.0
+        risk_reward_ratio = (avg_win / avg_loss) if avg_loss > 0 else 0.0
+
+        # ---------- Risk-adjusted returns (prefer per-bar equity if present) ----------
+        PERIODS_PER_YEAR = 252 * 24 * 12  # ~5m bars/year; adjust if your data frequency differs
+        use_bar_equity = hasattr(self, 'bar_equity') and self.bar_equity
+
+        if use_bar_equity:
+            _, eq_series = zip(*self.bar_equity)
+            eq = np.asarray(eq_series, dtype=float)
         else:
-            sharpe_ratio = sortino_ratio = volatility = var_95 = 0
-        
-        # Consecutive wins/losses
-        max_consecutive_losses = max_consecutive_wins = current_consecutive_losses = current_consecutive_wins = 0
-        for trade in self.trades:
-            if trade.pnl < 0:
-                current_consecutive_losses += 1
-                current_consecutive_wins = 0
-                max_consecutive_losses = max(max_consecutive_losses, current_consecutive_losses)
-            else:
-                current_consecutive_wins += 1
-                current_consecutive_losses = 0
-                max_consecutive_wins = max(max_consecutive_wins, current_consecutive_wins)
-        
-        # Trade timing and behavior metrics
-        if self.trades:
-            # Calculate average holding time
-            holding_times = []
-            for trade in self.trades:
-                if trade.exit_time and trade.entry_time:
-                    # Convert timestamps to pandas Timestamp objects if they aren't already
-                    exit_time = pd.to_datetime(trade.exit_time) if not isinstance(trade.exit_time, pd.Timestamp) else trade.exit_time
-                    entry_time = pd.to_datetime(trade.entry_time) if not isinstance(trade.entry_time, pd.Timestamp) else trade.entry_time
-                    holding_time = (exit_time - entry_time).total_seconds() / 3600  # hours
-                    holding_times.append(holding_time)
-            
-            avg_holding_time = np.mean(holding_times) if holding_times else 0
-            
-            # Calculate trades per day (assuming 5-minute data)
-            if len(self.trades) > 1:
-                first_trade = min(pd.to_datetime(t.entry_time) if not isinstance(t.entry_time, pd.Timestamp) else t.entry_time for t in self.trades)
-                last_trade = max(pd.to_datetime(t.exit_time) if not isinstance(t.exit_time, pd.Timestamp) else t.exit_time for t in self.trades if t.exit_time)
-                if first_trade and last_trade:
-                    days_trading = (last_trade - first_trade).total_seconds() / (24 * 3600)
-                    trades_per_day = len(self.trades) / days_trading if days_trading > 0 else 0
-                else:
-                    trades_per_day = 0
-            else:
-                trades_per_day = 0
+            eq = np.asarray(self.equity_curve, dtype=float)
+
+        # Drawdown from equity
+        if eq.size > 0:
+            peak = np.maximum.accumulate(eq)
+            dd = (peak - eq) / np.where(peak == 0, 1.0, peak)
+            max_drawdown = float(np.max(dd)) if dd.size else 0.0
         else:
-            avg_holding_time = trades_per_day = 0
-        
-        # Fee and slippage analysis
+            max_drawdown = 0.0
+
+        # Per-period returns (guard for length)
+        if eq.size > 1:
+            returns = np.diff(eq) / eq[:-1]
+            mean_ret = float(np.mean(returns))
+            std_ret  = float(np.std(returns))
+            volatility = std_ret * np.sqrt(PERIODS_PER_YEAR)
+
+            sharpe_ratio = (np.sqrt(PERIODS_PER_YEAR) * mean_ret / std_ret) if std_ret > 0 else 0.0
+
+            downside = returns[returns < 0]
+            downside_std = float(np.std(downside)) if downside.size > 0 else 0.0
+            sortino_ratio = (np.sqrt(PERIODS_PER_YEAR) * mean_ret / downside_std) if downside_std > 0 else 0.0
+
+            var_95 = float(np.percentile(returns, 5))
+            annual_return = mean_ret * PERIODS_PER_YEAR  # linearized; fine for sanity check
+        else:
+            returns = np.array([])
+            volatility = 0.0
+            sharpe_ratio = 0.0
+            sortino_ratio = 0.0
+            var_95 = 0.0
+            annual_return = 0.0
+
+        calmar_ratio = (annual_return / max_drawdown) if max_drawdown > 0 else 0.0
+
+        # ---------- Streaks ----------
+        max_consecutive_losses = 0
+        max_consecutive_wins = 0
+        cur_losses = cur_wins = 0
+        for t in self.trades:
+            if t.pnl < 0:
+                cur_losses += 1
+                cur_wins = 0
+                max_consecutive_losses = max(max_consecutive_losses, cur_losses)
+            else:
+                cur_wins += 1
+                cur_losses = 0
+                max_consecutive_wins = max(max_consecutive_wins, cur_wins)
+
+        # ---------- Time & frequency metrics ----------
+        # Average holding time
+        holding_hours = []
+        for t in self.trades:
+            if t.exit_time and t.entry_time:
+                exit_ts = pd.to_datetime(t.exit_time)
+                entry_ts = pd.to_datetime(t.entry_time)
+                holding_hours.append((exit_ts - entry_ts).total_seconds() / 3600.0)
+        avg_holding_time = float(np.mean(holding_hours)) if holding_hours else 0.0
+
+        # Trades per day + exposure use wall-clock window from first to last trade
+        if len(self.trades) > 1:
+            first_ts = min(pd.to_datetime(t.entry_time) for t in self.trades if t.entry_time)
+            last_ts  = max(pd.to_datetime(t.exit_time)  for t in self.trades if t.exit_time) or first_ts
+            days_span = max((last_ts - first_ts).total_seconds() / (24 * 3600), 1e-9)
+            trades_per_day = len(self.trades) / days_span
+
+            total_time_in_market = sum(
+                max((pd.to_datetime(t.exit_time) - pd.to_datetime(t.entry_time)).total_seconds(), 0.0)
+                for t in self.trades if t.exit_time and t.entry_time
+            )
+            exposure_percentage = (total_time_in_market / max((last_ts - first_ts).total_seconds(), 1.0)) * 100.0
+        else:
+            trades_per_day = 0.0
+            exposure_percentage = 0.0
+
+        # ---------- Costs ----------
         total_fees = sum(t.fees for t in self.trades)
-        total_slippage = 0  # Would need to track this separately in a real implementation
-        
-        # Leverage and margin metrics
+        total_slippage = 0.0  # track separately if you store it per order
+
+        # ---------- Leverage/margin (rough) ----------
         if self.leverage > 1.0:
-            # Calculate average position size as percentage of capital
-            avg_position_sizes = [t.size * t.entry_price / self.initial_capital for t in self.trades if t.entry_price > 0]
-            avg_position_size_pct = np.mean(avg_position_sizes) if avg_position_sizes else 0
-            margin_utilization = avg_position_size_pct * self.leverage
-            liquidation_risk = 1.0 / self.leverage  # Simplified liquidation risk
+            avg_pos_val = [t.size * t.entry_price for t in self.trades if t.entry_price > 0]
+            margin_utilization = float(np.mean([v / self.initial_capital for v in avg_pos_val])) * self.leverage if avg_pos_val else 0.0
+            liquidation_risk = 1.0 / self.leverage
         else:
-            margin_utilization = liquidation_risk = 0
-        
-        # Exposure percentage (time in market)
-        if self.trades:
-            total_time = 0
-            for trade in self.trades:
-                if trade.exit_time and trade.entry_time:
-                    try:
-                        # Try to calculate time difference safely
-                        if hasattr(trade.exit_time, 'total_seconds') and hasattr(trade.entry_time, 'total_seconds'):
-                            total_time += (trade.exit_time - trade.entry_time).total_seconds()
-                        else:
-                            # Default estimate: 2 hours per trade
-                            total_time += 2 * 3600  # 2 hours in seconds
-                    except (AttributeError, TypeError):
-                        # Default estimate: 2 hours per trade
-                        total_time += 2 * 3600  # 2 hours in seconds
-            
-            # Assuming 5-minute data, calculate total available time
-            if len(self.equity_curve) > 1:
-                total_available_time = (len(self.equity_curve) - 1) * 5 * 60  # seconds
-                exposure_percentage = (total_time / total_available_time) * 100 if total_available_time > 0 else 0
-            else:
-                exposure_percentage = 0
-        else:
-            exposure_percentage = 0
-        
-        # Break-even point (including fees)
-        if total_fees > 0:
-            break_even_point = total_fees / self.initial_capital
-        else:
-            break_even_point = 0
-        
-        # Largest win/loss
-        largest_win = max((t.pnl for t in winning_trades), default=0)
-        largest_loss = min((t.pnl for t in losing_trades), default=0)
-        
-        # Calmar ratio (annual return / max drawdown)
-        if max_drawdown > 0:
-            # Annualize return (assuming 5-minute data)
-            annual_return = total_return * (252 * 24 * 12) / len(self.equity_curve) if len(self.equity_curve) > 1 else 0
-            calmar_ratio = annual_return / max_drawdown
-        else:
-            calmar_ratio = 0
-        
-        # Calculate position-level and order-level metrics
+            margin_utilization = 0.0
+            liquidation_risk = 0.0
+
+        # ---------- Largest win/loss ----------
+        largest_win  = max((t.pnl for t in winning_trades), default=0.0)
+        largest_loss = min((t.pnl for t in losing_trades), default=0.0)
+
+        # ---------- Position & order metrics ----------
         position_metrics = self._calculate_position_metrics()
         order_metrics = self._calculate_order_metrics()
-        
+
         return {
             'total_return': total_return,
             'win_rate': win_rate,
@@ -701,7 +697,7 @@ class BaseStrategy(ABC):
             'final_capital': self.current_capital,
             'risk_reward_ratio': risk_reward_ratio,
             'exposure_percentage': exposure_percentage,
-            'break_even_point': break_even_point,
+            'break_even_point': (total_fees / self.initial_capital) if self.initial_capital > 0 else 0.0,
             'trades_per_day': trades_per_day,
             'avg_holding_time': avg_holding_time,
             'total_fees': total_fees,
@@ -713,10 +709,10 @@ class BaseStrategy(ABC):
             'largest_loss': largest_loss,
             'volatility': volatility,
             'var_95': var_95,
-            # New position-level metrics
             'position_metrics': position_metrics,
             'order_metrics': order_metrics
         }
+
     
     def _calculate_position_metrics(self) -> Dict[str, Any]:
         """Calculate metrics specific to positions."""
