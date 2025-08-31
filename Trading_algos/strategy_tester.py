@@ -203,6 +203,7 @@ class StrategyTester:
             'metrics': metrics,
             'trades': strategy.trades,
             'equity_curve': strategy.equity_curve,
+            'original_data': data.copy(),  # Store original data for plotting
             'data_period': {
                 'start': data['timestamp'].min(),
                 'end': data['timestamp'].max(),
@@ -281,9 +282,18 @@ class StrategyTester:
         strategy = self.load_strategy(strategy_name, **strategy_params)
         return self.backtest_strategy(strategy, data, verbose=verbose)
     
-    def plot_results(self, strategy_name: str, data: pd.DataFrame, 
+    def plot_results(self, strategy_name: str, data: pd.DataFrame = None, 
                     save_path: str = None, show_plot: bool = True) -> None:
-        """Generate comprehensive plots for strategy results."""
+        """
+        Generate comprehensive plots for strategy results.
+        
+        Args:
+            strategy_name: Name of the strategy to plot
+            data: Original OHLCV DataFrame used for backtesting. If None, will try to 
+                  extract from stored results or provide helpful error message.
+            save_path: Optional path to save the plot
+            show_plot: Whether to display the plot
+        """
         if strategy_name not in self.test_results:
             print(f"No results found for strategy: {strategy_name}")
             return
@@ -292,14 +302,37 @@ class StrategyTester:
         trades = result['trades']
         equity_curve = result['equity_curve']
         
+        # Handle missing data parameter
+        if data is None:
+            # Try to get data from stored results if available
+            if 'original_data' in result:
+                data = result['original_data']
+            else:
+                print(f"❌ Error: No price data provided for plotting.")
+                print(f"")
+                print(f"The plot_results method needs the original OHLCV data to plot price charts.")
+                print(f"")
+                print(f"💡 Solutions:")
+                print(f"1. If you used test_fibonacci_strategy() or similar helper functions:")
+                print(f"   tester.plot_results('{strategy_name}', results['data'])")
+                print(f"")
+                print(f"2. If you have the original data in a variable 'data':")
+                print(f"   tester.plot_results('{strategy_name}', data)")
+                print(f"")
+                print(f"3. If you used run_backtest() with a DataFrame 'df':")
+                print(f"   tester.plot_results('{strategy_name}', df)")
+                return
+        
         # Create figure with subplots
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
         fig.suptitle(f'Strategy Results: {strategy_name}', fontsize=16, fontweight='bold')
         
         # 1. Price chart with buy/sell signals
-        ax1.plot(data['timestamp'], data['close'], label='Price', alpha=0.7, linewidth=1)
+        # Convert timestamps to datetime for matplotlib compatibility
+        plot_timestamps = pd.to_datetime(data['timestamp']).dt.to_pydatetime()
+        ax1.plot(plot_timestamps, data['close'], label='Price', alpha=0.7, linewidth=1)
         
-        # Plot buy/sell signals
+        # Plot buy/sell signals with timestamp conversion
         buy_signals = [(t.entry_time, t.entry_price) for t in trades if t.position == PositionType.LONG]
         sell_signals = [(t.exit_time, t.exit_price) for t in trades if t.position == PositionType.LONG and t.exit_time]
         short_signals = [(t.entry_time, t.entry_price) for t in trades if t.position == PositionType.SHORT]
@@ -307,18 +340,26 @@ class StrategyTester:
         
         if buy_signals:
             buy_times, buy_prices = zip(*buy_signals)
+            # Convert timestamps to datetime
+            buy_times = [pd.to_datetime(t).to_pydatetime() for t in buy_times]
             ax1.scatter(buy_times, buy_prices, color='green', marker='^', s=100, label='Buy', alpha=0.8)
         
         if sell_signals:
             sell_times, sell_prices = zip(*sell_signals)
+            # Convert timestamps to datetime
+            sell_times = [pd.to_datetime(t).to_pydatetime() for t in sell_times]
             ax1.scatter(sell_times, sell_prices, color='red', marker='v', s=100, label='Sell', alpha=0.8)
         
         if short_signals:
             short_times, short_prices = zip(*short_signals)
+            # Convert timestamps to datetime
+            short_times = [pd.to_datetime(t).to_pydatetime() for t in short_times]
             ax1.scatter(short_times, short_prices, color='orange', marker='v', s=100, label='Short', alpha=0.8)
         
         if cover_signals:
             cover_times, cover_prices = zip(*cover_signals)
+            # Convert timestamps to datetime
+            cover_times = [pd.to_datetime(t).to_pydatetime() for t in cover_times]
             ax1.scatter(cover_times, cover_prices, color='blue', marker='^', s=100, label='Cover', alpha=0.8)
         
         ax1.set_title('Price Chart with Trading Signals')
@@ -333,7 +374,9 @@ class StrategyTester:
         
         # 2. Equity curve
         timestamps = data['timestamp'].iloc[:len(equity_curve)]
-        ax2.plot(timestamps, equity_curve, label='Equity Curve', linewidth=2, color='blue')
+        # Convert timestamps to datetime for matplotlib compatibility
+        plot_timestamps_equity = pd.to_datetime(timestamps).dt.to_pydatetime()
+        ax2.plot(plot_timestamps_equity, equity_curve, label='Equity Curve', linewidth=2, color='blue')
         ax2.axhline(y=self.initial_capital, color='red', linestyle='--', alpha=0.7, label='Initial Capital')
         ax2.set_title('Equity Curve')
         ax2.set_ylabel('Capital (USDT)')
@@ -354,8 +397,8 @@ class StrategyTester:
             drawdown = (peak - capital) / peak * 100
             drawdowns.append(drawdown)
         
-        ax3.fill_between(timestamps, drawdowns, 0, alpha=0.3, color='red', label='Drawdown')
-        ax3.plot(timestamps, drawdowns, color='red', linewidth=1)
+        ax3.fill_between(plot_timestamps_equity, drawdowns, 0, alpha=0.3, color='red', label='Drawdown')
+        ax3.plot(plot_timestamps_equity, drawdowns, color='red', linewidth=1)
         ax3.set_title('Drawdown Analysis')
         ax3.set_ylabel('Drawdown (%)')
         ax3.set_ylim(bottom=0)
