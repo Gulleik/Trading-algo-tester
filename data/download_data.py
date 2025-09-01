@@ -39,6 +39,7 @@ class DataDownloader:
         # Supported timeframes and their millisecond equivalents
         self.timeframe_ms = {
             '1m': 60 * 1000,
+            '3m': 3 * 60 * 1000,
             '5m': 5 * 60 * 1000,
             '15m': 15 * 60 * 1000,
             '30m': 30 * 60 * 1000,
@@ -266,9 +267,9 @@ def main():
     # ========================================
     # CONFIGURE YOUR DOWNLOAD PARAMETERS HERE
     # ========================================
-    SYMBOL = "ETHUSDT"      # Trading symbol
-    TIMEFRAME = "15m"              # Data timeframe (1m, 5m, 15m, 30m, 1h, 4h, 1d)
-    NUM_CANDLES = 300000            # Number of candles to download
+    SYMBOL = "SOLUSDT"      # Trading symbol
+    TIMEFRAME = "15m"              # Data timeframe (1m, 3m 5m, 15m, 30m, 1h, 4h, 1d)
+    NUM_CANDLES = 100000            # Number of candles to download
     INCLUDE_FUNDING = True       # Set to True to download funding data
     DATA_DIR = "data"             # Directory to store data
     # ========================================
